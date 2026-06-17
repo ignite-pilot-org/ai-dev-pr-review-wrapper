@@ -77,6 +77,18 @@ jobs:
           path: .ai-dev-pr-review
           fetch-depth: 1
 
+      # --- Wrapper canonical default prompts (fallback) ---
+      # Sparse-checkout of this wrapper repo's own .prompts/ directory, used
+      # when the consumer has no per-repo prompt files on either branch.
+      - name: Checkout wrapper canonical default prompts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ignite-pilot-org/ai-dev-pr-review-wrapper
+          ref: main
+          path: .wrapper-defaults
+          sparse-checkout: .prompts
+          sparse-checkout-cone-mode: false
+
       # ====================== PREPARE PHASE ======================
       # Mirrors base-ai-review-prepare.yml inline so we run in a single job.
 
@@ -155,24 +167,22 @@ jobs:
           git fetch --depth=1 origin "$BASE_REF"
           if git show "origin/${BASE_REF}:${SYSTEM_PROMPT_PATH}" > context.md 2>/dev/null; then
             :
-          else
-            if [ ! -f "${SYSTEM_PROMPT_PATH}" ]; then
-              echo "::error title=Missing required prompt file::${SYSTEM_PROMPT_PATH} not found on base branch '${BASE_REF}' nor on PR head. The consumer repo must commit this file (and its sibling ${CHECKLIST_PATH}). See ignite-corp/ai-dev-pr-review README for the canonical template."
-              exit 1
-            fi
+          elif [ -f "${SYSTEM_PROMPT_PATH}" ]; then
             echo "::warning title=Onboarding prompt fallback::Base branch '${BASE_REF}' has no ${SYSTEM_PROMPT_PATH}; using PR head. Future PRs will use the base branch version once this PR merges."
             cat "${SYSTEM_PROMPT_PATH}" > context.md
+          else
+            echo "::warning title=Using wrapper canonical default::Consumer repo has no ${SYSTEM_PROMPT_PATH} on either branch; falling back to wrapper canonical default from .wrapper-defaults/.prompts/code-review-system.md. Consider committing a custom prompt to the consumer for project-specific guidance."
+            cat .wrapper-defaults/.prompts/code-review-system.md > context.md
           fi
           printf '\n\n---\n\n' >> context.md
           if git show "origin/${BASE_REF}:${CHECKLIST_PATH}" >> context.md 2>/dev/null; then
             :
-          else
-            if [ ! -f "${CHECKLIST_PATH}" ]; then
-              echo "::error title=Missing required prompt file::${CHECKLIST_PATH} not found on base branch '${BASE_REF}' nor on PR head. The consumer repo must commit this file (and its sibling ${SYSTEM_PROMPT_PATH}). See ignite-corp/ai-dev-pr-review README for the canonical template."
-              exit 1
-            fi
+          elif [ -f "${CHECKLIST_PATH}" ]; then
             echo "::warning title=Onboarding prompt fallback::Base branch '${BASE_REF}' has no ${CHECKLIST_PATH}; using PR head. Future PRs will use the base branch version once this PR merges."
             cat "${CHECKLIST_PATH}" >> context.md
+          else
+            echo "::warning title=Using wrapper canonical default::Consumer repo has no ${CHECKLIST_PATH} on either branch; falling back to wrapper canonical default from .wrapper-defaults/.prompts/code-review-checklist.md. Consider committing a custom prompt to the consumer for project-specific guidance."
+            cat .wrapper-defaults/.prompts/code-review-checklist.md >> context.md
           fi
           {
             echo "## PR Metadata"
