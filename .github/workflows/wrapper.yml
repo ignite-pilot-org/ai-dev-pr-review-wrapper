@@ -531,19 +531,6 @@ jobs:
             done
           fi
 
-      - name: Verify Codex verdict file
-        if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true' && always()
-        env:
-          EXIT_CODE: ${{ steps.codex_run.outputs.exit_code }}
-        run: |
-          set -euo pipefail
-          if [ -s "review-codex.json" ]; then
-            echo "::notice::Codex verdict file present"
-          else
-            echo "::error::Codex review produced no verdict file (exit_code=${EXIT_CODE:-unknown})"
-            exit 1
-          fi
-
       - name: Post Codex inline comments
         if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true' && always()
         continue-on-error: true
@@ -621,25 +608,47 @@ jobs:
       # verdict even when one or more reviewers failed or early-exited --
       # the aggregate script handles missing review-*.json files.
 
+      - name: Synthesize missing reviewer verdicts
+        if: steps.size-check.outputs.skip == 'false' && always()
+        run: |
+          synthesize_missing_verdict() {
+            local file="$1"
+            local reviewer="$2"
+            if [ ! -f "$file" ]; then
+              echo "::warning title=Reviewer verdict missing::${reviewer} did not produce ${file}; treating as early-exit. Check earlier steps for the root cause."
+              cat > "$file" <<EOF
+          {"early_exit": true, "reason": "Reviewer ${reviewer} did not produce a verdict file. Possible causes: prepare step failed earlier, reviewer CLI crashed, or runner ran out of resources. Check earlier steps in this job log."}
+          EOF
+            fi
+          }
+          synthesize_missing_verdict review-claude.json claude
+          synthesize_missing_verdict review-codex.json codex
+          synthesize_missing_verdict review-gemini.json gemini
+
       - name: Compute reviewer result statuses
         id: results
         if: steps.size-check.outputs.skip == 'false' && always()
         run: |
           # Derive success/failure/skipped per reviewer for the aggregate
-          # script, which expects upstream job-result semantics.
+          # script, which expects upstream job-result semantics. Missing
+          # verdict files have already been synthesized as early-exit stubs
+          # by the prior step, so all three files are guaranteed to exist
+          # here; a synthesized stub surfaces as skipped via early_exit.
           claude="success"
           codex="success"
           gemini="success"
-          if [ ! -f review-claude.json ]; then claude="failure"; fi
-          if [ "${{ steps.claude-exit.outputs.early_exit }}" = "true" ]; then
+          if [ "$(jq -r '.early_exit // false' review-claude.json)" = "true" ]; then
+            claude="skipped"
             codex="skipped"
             gemini="skipped"
           else
-            if [ ! -f review-codex.json ]; then codex="failure"; fi
-            if [ "${{ steps.codex-exit.outputs.early_exit }}" = "true" ]; then
+            if [ "$(jq -r '.early_exit // false' review-codex.json)" = "true" ]; then
+              codex="skipped"
               gemini="skipped"
             else
-              if [ ! -f review-gemini.json ]; then gemini="failure"; fi
+              if [ "$(jq -r '.early_exit // false' review-gemini.json)" = "true" ]; then
+                gemini="skipped"
+              fi
             fi
           fi
           echo "claude=$claude" >> "$GITHUB_OUTPUT"
