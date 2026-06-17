@@ -156,6 +156,10 @@ jobs:
           if git show "origin/${BASE_REF}:${SYSTEM_PROMPT_PATH}" > context.md 2>/dev/null; then
             :
           else
+            if [ ! -f "${SYSTEM_PROMPT_PATH}" ]; then
+              echo "::error title=Missing required prompt file::${SYSTEM_PROMPT_PATH} not found on base branch '${BASE_REF}' nor on PR head. The consumer repo must commit this file (and its sibling ${CHECKLIST_PATH}). See ignite-corp/ai-dev-pr-review README for the canonical template."
+              exit 1
+            fi
             echo "::warning title=Onboarding prompt fallback::Base branch '${BASE_REF}' has no ${SYSTEM_PROMPT_PATH}; using PR head. Future PRs will use the base branch version once this PR merges."
             cat "${SYSTEM_PROMPT_PATH}" > context.md
           fi
@@ -163,6 +167,10 @@ jobs:
           if git show "origin/${BASE_REF}:${CHECKLIST_PATH}" >> context.md 2>/dev/null; then
             :
           else
+            if [ ! -f "${CHECKLIST_PATH}" ]; then
+              echo "::error title=Missing required prompt file::${CHECKLIST_PATH} not found on base branch '${BASE_REF}' nor on PR head. The consumer repo must commit this file (and its sibling ${SYSTEM_PROMPT_PATH}). See ignite-corp/ai-dev-pr-review README for the canonical template."
+              exit 1
+            fi
             echo "::warning title=Onboarding prompt fallback::Base branch '${BASE_REF}' has no ${CHECKLIST_PATH}; using PR head. Future PRs will use the base branch version once this PR merges."
             cat "${CHECKLIST_PATH}" >> context.md
           fi
