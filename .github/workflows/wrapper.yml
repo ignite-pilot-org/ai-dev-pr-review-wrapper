@@ -31,7 +31,7 @@ on:
         description: "Tag/ref of ignite-corp/ai-dev-pr-review to check out (e.g. v1, v1.0.12)"
         required: false
         type: string
-        default: "v1.0.12"
+        default: "v1"
     secrets:
       OPENAI_API_KEY:
         required: true
@@ -40,6 +40,8 @@ on:
       ANTHROPIC_API_KEY:
         required: false
       CLAUDE_CODE_OAUTH_TOKEN:
+        required: false
+      REVIEWER_APP_PRIVATE_KEY:
         required: false
 
 permissions:
@@ -665,10 +667,23 @@ jobs:
           echo "codex=$codex" >> "$GITHUB_OUTPUT"
           echo "gemini=$gemini" >> "$GITHUB_OUTPUT"
 
+      # Optional dedicated reviewer App token. github-actions[bot] cannot post
+      # an APPROVED review, so when REVIEWER_APP_ID is configured we mint an App
+      # installation token and hand it to the aggregate script for the approve
+      # call only. Skipped entirely when the var is unset (backward compatible).
+      - name: Mint reviewer App token
+        id: reviewer_token
+        if: ${{ steps.size-check.outputs.skip == 'false' && always() && vars.REVIEWER_APP_ID != '' }}
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
+        with:
+          app-id: ${{ vars.REVIEWER_APP_ID }}
+          private-key: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
+
       - name: Aggregate and post verdict
         if: steps.size-check.outputs.skip == 'false' && always()
         env:
           GH_TOKEN: ${{ github.token }}
+          REVIEWER_TOKEN: ${{ steps.reviewer_token.outputs.token }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           BOT_LOGIN: ${{ vars.BOT_LOGIN || 'github-actions[bot]' }}
