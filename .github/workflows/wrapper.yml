@@ -31,7 +31,7 @@ on:
         description: "Tag/ref of ignite-corp/ai-dev-pr-review to check out (e.g. v1, v1.0.12)"
         required: false
         type: string
-        default: "v1.0.12"
+        default: "v1"
     secrets:
       OPENAI_API_KEY:
         required: true
