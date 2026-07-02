@@ -2,16 +2,16 @@
 
 ## Code Quality
 
-- [ ] All imports follow layer rules (api_server -> infrastructure -> core)
-- [ ] No forbidden naming suffixes (Manager, Handler, Helper, Utils, Processor, standalone Service)
+- [ ] Imports respect the project's module/layer boundaries (no wrong-direction dependencies)
+- [ ] Names are clear and consistent with the project's conventions
 - [ ] All public functions have type annotations
 - [ ] No magic numbers or strings in business logic
-- [ ] No functions exceeding 80 lines (ruff PLR0915)
+- [ ] No overly long functions (~80+ lines) or oversized classes/modules
 - [ ] No classes exceeding 500 lines
 - [ ] No copy-paste duplication introduced
 - [ ] Unused imports or variables removed
 - [ ] Error paths and boundary conditions handled
-- [ ] Logging uses structured format (no print statements)
+- [ ] Logging uses a structured format (no ad-hoc console/stdout logging)
 
 ## Security (OWASP Top 10 Focus)
 
@@ -22,7 +22,7 @@
 - [ ] A05 Security Misconfiguration: No debug mode in production config
 - [ ] A06 Vulnerable Components: New dependencies checked for known CVEs
 - [ ] A07 Auth Failures: JWT validation present on protected routes
-- [ ] A08 Data Integrity: Serialization uses safe libraries (no pickle for user data)
+- [ ] A08 Data Integrity: No unsafe deserialization of untrusted data
 - [ ] A09 Logging Failures: No sensitive data in log output
 - [ ] A10 SSRF: External URLs validated before requests
 
@@ -32,6 +32,6 @@
 - [ ] API endpoints match spec (method, path, request/response schema)
 - [ ] DB model changes match data model spec
 - [ ] Domain events match event catalog
-- [ ] Naming conventions followed (see docs/guides/naming-conventions.md)
+- [ ] Naming conventions followed (per the repo's conventions)
 - [ ] Error codes match error code spec
-- [ ] Pydantic models used for configuration (not plain classes)
+- [ ] Configuration uses typed / validated structures
