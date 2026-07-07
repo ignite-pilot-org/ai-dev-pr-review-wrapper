@@ -8,6 +8,13 @@ name: AI Review Wrapper
 # re-implements the orchestrator by checking out upstream scripts and
 # running the same logic inline. The wrapper preserves the upstream
 # orchestrator's input/secret contract for drop-in replacement.
+#
+# Versioning: this repo's release MAJOR.MINOR tracks ignite-corp/ai-dev-pr-review
+# in lockstep; PATCH moves independently per repo. Current pairing: wrapper
+# v1.1.0 <-> base v1.1.0 (content of base v1.0.21). When either repo needs a
+# MINOR (or MAJOR) bump, the other cuts a matching alignment release --
+# content-identical if it has no changes. Both repos auto-float their v1 major
+# tag via move-major-tag.yml on release publish, so @v1 consumers need no action.
 
 on:
   workflow_call:
