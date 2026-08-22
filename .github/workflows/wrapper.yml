@@ -11,7 +11,7 @@ name: AI Review Wrapper
 #
 # Versioning: this repo's release MAJOR.MINOR tracks ignite-corp/ai-dev-pr-review
 # in lockstep; PATCH moves independently per repo. Current pairing: wrapper
-# v1.3.0 <-> base v1.3.0. When either repo needs a
+# v1.4.0 <-> base v1.4.0. When either repo needs a
 # MINOR (or MAJOR) bump, the other cuts a matching alignment release --
 # content-identical if it has no changes. Both repos auto-float their v1 major
 # tag via move-major-tag.yml on release publish, so @v1 consumers need no action.
