@@ -11,7 +11,7 @@ name: AI Review Wrapper
 #
 # Versioning: this repo's release MAJOR.MINOR tracks ignite-corp/ai-dev-pr-review
 # in lockstep; PATCH moves independently per repo. Current pairing: wrapper
-# v1.4.0 <-> base v1.4.0. When either repo needs a
+# v1.5.0 <-> base v1.5.0. When either repo needs a
 # MINOR (or MAJOR) bump, the other cuts a matching alignment release --
 # content-identical if it has no changes. Both repos auto-float their v1 major
 # tag via move-major-tag.yml on release publish, so @v1 consumers need no action.
@@ -374,6 +374,47 @@ jobs:
             exit 0
           fi
           python3 .ai-dev-pr-review/.github/scripts/extract_claude_review.py "$EXEC_FILE"
+
+      # Ported from base-ai-review-single.yml (AT-1837). When the Claude
+      # action dies before writing a verdict (e.g. its non-human-actor guard
+      # rejecting a bot-triggered run), this path produced no verdict file at
+      # all, and the aggregate-phase "Synthesize missing reviewer verdicts"
+      # step then stamped it as an early-exit stub -- which the wrapper reads
+      # as a Claude-requested skip, marking all three reviewers "skipped" and
+      # reporting an outage as a benign no-op. Emit the same shape of error
+      # verdict the codex path emits so both reviewers fail the same, visible
+      # way. The prompt requires a verdict file even for early_exit, so a
+      # missing file here is always an infrastructure failure, never a benign
+      # skip. Not continue-on-error: if we cannot even record the failure,
+      # the job must not report success.
+      - name: Emit Claude error verdict (no verdict file)
+        if: steps.size-check.outputs.skip == 'false' && always()
+        env:
+          EXEC_FILE: ${{ steps.claude-review.outputs.execution_file }}
+          STEP_OUTCOME: ${{ steps.claude-review.outcome }}
+        run: |
+          set -euo pipefail
+          if [ -s review-claude.json ]; then
+            echo "::notice::Claude verdict file present"
+            exit 0
+          fi
+          if [ -n "$EXEC_FILE" ] && [ -f "$EXEC_FILE" ]; then
+            ERROR_KIND="output_unparseable"
+            DETAIL="claude-code-action outcome=${STEP_OUTCOME}; execution log held no verdict JSON"
+          else
+            ERROR_KIND="action_invocation_failed"
+            DETAIL="claude-code-action outcome=${STEP_OUTCOME}; no execution log produced"
+          fi
+          echo "::warning::Claude review produced no verdict file -- emitting error verdict (${ERROR_KIND})"
+          jq -n --arg kind "$ERROR_KIND" --arg detail "$DETAIL" '{
+            summary: ("Claude review failed: no verdict file produced -- " + $detail),
+            status: "failed",
+            early_exit: false,
+            issues: [],
+            error: $kind,
+            error_detail: $detail
+          }' > review-claude.json
+          jq empty review-claude.json
 
       - name: Post Claude inline comments
         if: steps.size-check.outputs.skip == 'false' && always()
