@@ -806,8 +806,11 @@ jobs:
           # payload, a missing status and an unknown status are all "failed"
           # there, so reporting them as "success" here would contradict the
           # contract this step feeds. Only "ok" and "early_exit" are reviews
-          # that happened; the parse check runs first because reading .status
-          # out of garbage would abort the step under `set -e`.
+          # that happened (base's MODEL_STATUSES, review_status.py). The parse
+          # check is not load-bearing -- the case below already falls through
+          # to "failure" for a payload jq cannot read -- it runs first so an
+          # unreadable payload is named as such instead of reaching the status
+          # check and leaving a jq parse error in the job log.
           reviewer_result() {
             local file="$1"
             if [ ! -s "$file" ]; then
