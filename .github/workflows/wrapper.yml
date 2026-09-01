@@ -383,10 +383,12 @@ jobs:
       # as a Claude-requested skip, marking all three reviewers "skipped" and
       # reporting an outage as a benign no-op. Emit the same shape of error
       # verdict the codex path emits so both reviewers fail the same, visible
-      # way. The prompt requires a verdict file even for early_exit, so a
-      # missing file here is always an infrastructure failure, never a benign
-      # skip. Not continue-on-error: if we cannot even record the failure,
-      # the job must not report success.
+      # way. That aggregate-phase step now emits a failed verdict too
+      # (AT-1979); this one stays because it names the Claude-specific cause
+      # (action_invocation_failed vs output_unparseable). The prompt requires
+      # a verdict file even for early_exit, so a missing file here is always
+      # an infrastructure failure, never a benign skip. Not continue-on-error:
+      # if we cannot even record the failure, the job must not report success.
       - name: Emit Claude error verdict (no verdict file)
         if: steps.size-check.outputs.skip == 'false' && always()
         env:
@@ -740,52 +742,95 @@ jobs:
       # verdict even when one or more reviewers failed or early-exited --
       # the aggregate script handles missing review-*.json files.
 
+      # A reviewer that writes no verdict file has failed -- the reviewer
+      # prompts require a file even for a real early exit, so a missing file
+      # is always an infrastructure failure (AT-1979). This step used to stamp
+      # one as `early_exit: true`, which the sequential chain below reads as
+      # "the reviewer asked to skip the rest", so an outage was recorded as a
+      # benign no-op. Emit the same `status: "failed"` error verdict base uses
+      # (base-ai-review-single.yml, review_gemini.py) instead: it never counts
+      # as a performed review in aggregate_reviews.py, and its
+      # `early_exit: false` leaves the reviewers after it running.
+      #
+      # Reviewers the chain deliberately skipped are the one exception: they
+      # were never expected to write anything, so they stay absent and are
+      # reported as skipped by the step below -- matching base, where a skipped
+      # reviewer job simply uploads no artifact.
       - name: Synthesize missing reviewer verdicts
         if: steps.size-check.outputs.skip == 'false' && always()
         run: |
-          synthesize_missing_verdict() {
+          set -euo pipefail
+          synthesize_failed_verdict() {
             local file="$1"
             local reviewer="$2"
-            if [ ! -f "$file" ]; then
-              echo "::warning title=Reviewer verdict missing::${reviewer} did not produce ${file}; treating as early-exit. Check earlier steps for the root cause."
-              cat > "$file" <<EOF
-          {"early_exit": true, "reason": "Reviewer ${reviewer} did not produce a verdict file. Possible causes: prepare step failed earlier, reviewer CLI crashed, or runner ran out of resources. Check earlier steps in this job log."}
-          EOF
+            if [ -s "$file" ]; then
+              return 0
             fi
+            local detail="Reviewer ${reviewer} produced no verdict file (${file}). Possible causes: a step before the reviewer failed, the reviewer CLI or action crashed, the step timed out, or the runner ran out of resources. Check earlier steps in this job log."
+            echo "::warning title=Reviewer verdict missing::${detail}"
+            jq -n --arg reviewer "$reviewer" --arg detail "$detail" '{
+              summary: ($reviewer + " review failed: no verdict file produced -- " + $detail),
+              status: "failed",
+              early_exit: false,
+              issues: [],
+              error: "reviewer_produced_no_verdict",
+              error_detail: $detail
+            }' > "$file"
           }
-          synthesize_missing_verdict review-claude.json claude
-          synthesize_missing_verdict review-codex.json codex
-          synthesize_missing_verdict review-gemini.json gemini
+          early_exited() {
+            local file="$1"
+            [ -s "$file" ] && [ "$(jq -r '.early_exit // false' "$file")" = "true" ]
+          }
+          synthesize_failed_verdict review-claude.json claude
+          if ! early_exited review-claude.json; then
+            synthesize_failed_verdict review-codex.json codex
+            if ! early_exited review-codex.json; then
+              synthesize_failed_verdict review-gemini.json gemini
+            fi
+          fi
 
       - name: Compute reviewer result statuses
         id: results
         if: steps.size-check.outputs.skip == 'false' && always()
         run: |
+          set -euo pipefail
           # Derive success/failure/skipped per reviewer for the aggregate
-          # script, which expects upstream job-result semantics. Missing
-          # verdict files have already been synthesized as early-exit stubs
-          # by the prior step, so all three files are guaranteed to exist
-          # here; a synthesized stub surfaces as skipped via early_exit.
-          claude="success"
-          codex="success"
-          gemini="success"
-          if [ "$(jq -r '.early_exit // false' review-claude.json)" = "true" ]; then
-            claude="skipped"
-            codex="skipped"
-            gemini="skipped"
-          else
-            if [ "$(jq -r '.early_exit // false' review-codex.json)" = "true" ]; then
-              codex="skipped"
-              gemini="skipped"
-            else
-              if [ "$(jq -r '.early_exit // false' review-gemini.json)" = "true" ]; then
-                gemini="skipped"
-              fi
+          # script, which expects upstream job-result semantics. After the step
+          # above, a reviewer has a verdict file unless the sequential chain
+          # skipped it, so an absent file means skipped. A `status: "failed"`
+          # verdict must report "failure": reporting it as "success" would let
+          # aggregate_reviews.py read a run in which every reviewer died as one
+          # in which every reviewer job exited cleanly (AT-1979).
+          # Fail closed on anything that is not an explicitly successful
+          # verdict, the way base's _normalize_status does: an unparseable
+          # payload, a missing status and an unknown status are all "failed"
+          # there, so reporting them as "success" here would contradict the
+          # contract this step feeds. Only "ok" and "early_exit" are reviews
+          # that happened (base's MODEL_STATUSES, review_status.py). The parse
+          # check is not load-bearing -- the case below already falls through
+          # to "failure" for a payload jq cannot read -- it runs first so an
+          # unreadable payload is named as such instead of reaching the status
+          # check and leaving a jq parse error in the job log.
+          reviewer_result() {
+            local file="$1"
+            if [ ! -s "$file" ]; then
+              echo "skipped"
+              return
             fi
-          fi
-          echo "claude=$claude" >> "$GITHUB_OUTPUT"
-          echo "codex=$codex" >> "$GITHUB_OUTPUT"
-          echo "gemini=$gemini" >> "$GITHUB_OUTPUT"
+            if ! jq -e . "$file" >/dev/null 2>&1; then
+              echo "failure"
+              return
+            fi
+            case "$(jq -r '.status // ""' "$file")" in
+              ok|early_exit) echo "success" ;;
+              *) echo "failure" ;;
+            esac
+          }
+          {
+            echo "claude=$(reviewer_result review-claude.json)"
+            echo "codex=$(reviewer_result review-codex.json)"
+            echo "gemini=$(reviewer_result review-gemini.json)"
+          } >> "$GITHUB_OUTPUT"
 
       # Optional dedicated reviewer App token. github-actions[bot] cannot post
       # an APPROVED review, so when REVIEWER_APP_ID is configured we mint an App
