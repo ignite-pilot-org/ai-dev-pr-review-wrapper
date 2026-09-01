@@ -386,10 +386,9 @@ jobs:
       # way. That aggregate-phase step now emits a failed verdict too
       # (AT-1979); this one stays because it names the Claude-specific cause
       # (action_invocation_failed vs output_unparseable). The prompt requires
-      # a verdict file even for early_exit, so a
-      # missing file here is always an infrastructure failure, never a benign
-      # skip. Not continue-on-error: if we cannot even record the failure,
-      # the job must not report success.
+      # a verdict file even for early_exit, so a missing file here is always
+      # an infrastructure failure, never a benign skip. Not continue-on-error:
+      # if we cannot even record the failure, the job must not report success.
       - name: Emit Claude error verdict (no verdict file)
         if: steps.size-check.outputs.skip == 'false' && always()
         env:
@@ -802,15 +801,27 @@ jobs:
           # verdict must report "failure": reporting it as "success" would let
           # aggregate_reviews.py read a run in which every reviewer died as one
           # in which every reviewer job exited cleanly (AT-1979).
+          # Fail closed on anything that is not an explicitly successful
+          # verdict, the way base's _normalize_status does: an unparseable
+          # payload, a missing status and an unknown status are all "failed"
+          # there, so reporting them as "success" here would contradict the
+          # contract this step feeds. Only "ok" and "early_exit" are reviews
+          # that happened; the parse check runs first because reading .status
+          # out of garbage would abort the step under `set -e`.
           reviewer_result() {
             local file="$1"
             if [ ! -s "$file" ]; then
               echo "skipped"
-            elif [ "$(jq -r '.status // ""' "$file")" = "failed" ]; then
-              echo "failure"
-            else
-              echo "success"
+              return
             fi
+            if ! jq -e . "$file" >/dev/null 2>&1; then
+              echo "failure"
+              return
+            fi
+            case "$(jq -r '.status // ""' "$file")" in
+              ok|early_exit) echo "success" ;;
+              *) echo "failure" ;;
+            esac
           }
           {
             echo "claude=$(reviewer_result review-claude.json)"
