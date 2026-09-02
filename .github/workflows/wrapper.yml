@@ -615,15 +615,29 @@ jobs:
       # ====================== CODEX REVIEWER ======================
       # Skipped if Claude requested early_exit.
 
+      # `continue-on-error` on the two codex setup steps: without it a codex
+      # outage concluded the step `failure`, which poisoned the job status,
+      # and every later step whose `if:` carries no status-check function
+      # inherits an implicit `success()` and was skipped with it -- including
+      # the Gemini reviewer, which consumes no codex credential (AT-2114).
+      # With `continue-on-error` the step's `conclusion` is `success` so job
+      # status stays clean, while its `outcome` still records `failure`. That
+      # outcome is the discriminator: the codex steps below gate on it, so
+      # codex is skipped for a codex-shaped reason and nothing else is.
       - name: Install Codex CLI
         if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true'
+        continue-on-error: true
         # Pinned: unpinned installs pulled releases that dropped `codex exec
         # --full-auto`, breaking every codex review. Bump deliberately after
         # verifying `codex exec --help` for the new version.
         run: npm install -g @openai/codex@0.147.0
 
+      # A failed install leaves `codex login` missing, so this step fails too:
+      # its outcome is the single gate for the rest of the codex reviewer.
       - name: Authenticate Codex CLI with API key
+        id: codex-auth
         if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true'
+        continue-on-error: true
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -640,7 +654,10 @@ jobs:
 
       - name: Enable bubblewrap sandbox on Actions runner
         id: sysctl
-        if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true'
+        if: >-
+          steps.size-check.outputs.skip == 'false' &&
+          steps.claude-exit.outputs.early_exit != 'true' &&
+          steps.codex-auth.outcome == 'success'
         run: |
           orig_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
           orig_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
@@ -654,11 +671,17 @@ jobs:
           fi
 
       - name: Use trusted Codex prompt from ai-dev-pr-review
-        if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true'
+        if: >-
+          steps.size-check.outputs.skip == 'false' &&
+          steps.claude-exit.outputs.early_exit != 'true' &&
+          steps.codex-auth.outcome == 'success'
         run: cp .ai-dev-pr-review/.github/scripts/review_prompt.md "${RUNNER_TEMP}/review_prompt.md"
 
       - name: Run Codex review
-        if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true'
+        if: >-
+          steps.size-check.outputs.skip == 'false' &&
+          steps.claude-exit.outputs.early_exit != 'true' &&
+          steps.codex-auth.outcome == 'success'
         id: codex_run
         continue-on-error: true
         timeout-minutes: 10
@@ -863,11 +886,22 @@ jobs:
       # Skipped if Claude or Codex requested early_exit (matches upstream
       # sequential mode short-circuit semantics).
 
+      # `!cancelled()` suppresses the implicit `success()` this condition
+      # would otherwise carry, so Gemini depends only on the size gate and
+      # the early-exit chain -- never on whether an unrelated reviewer's
+      # credential worked. Gemini reads no codex or Claude credential, so a
+      # failure over there is not a reason to drop a third of the review
+      # (AT-2114). `!cancelled()` rather than `always()` for the same reason
+      # as the aggregate step (AT-2092): a cancelled run must review nothing.
+      # The `${{ }}` wrapper is required -- a bare leading `!` is a YAML tag
+      # indicator, not an expression.
       - name: Run Gemini review
+        id: gemini-run
         if: >-
+          ${{ !cancelled() &&
           steps.size-check.outputs.skip == 'false' &&
           steps.claude-exit.outputs.early_exit != 'true' &&
-          steps.codex-exit.outputs.early_exit != 'true'
+          steps.codex-exit.outputs.early_exit != 'true' }}
         continue-on-error: true
         timeout-minutes: 10
         env:
