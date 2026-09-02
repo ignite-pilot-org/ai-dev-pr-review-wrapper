@@ -896,7 +896,6 @@ jobs:
       # The `${{ }}` wrapper is required -- a bare leading `!` is a YAML tag
       # indicator, not an expression.
       - name: Run Gemini review
-        id: gemini_run
         if: >-
           ${{ !cancelled() &&
           steps.size-check.outputs.skip == 'false' &&
