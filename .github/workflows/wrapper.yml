@@ -11,7 +11,7 @@ name: AI Review Wrapper
 #
 # Versioning: this repo's release MAJOR.MINOR tracks ignite-corp/ai-dev-pr-review
 # in lockstep; PATCH moves independently per repo. Current pairing: wrapper
-# v1.6.0 <-> base v1.6.0. When either repo needs a
+# v1.7.0 <-> base v1.7.0. When either repo needs a
 # MINOR (or MAJOR) bump, the other cuts a matching alignment release --
 # content-identical if it has no changes. Both repos auto-float their v1 major
 # tag via move-major-tag.yml on release publish, so @v1 consumers need no action.
@@ -160,7 +160,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: ignite-pilot-org/ai-dev-pr-review-wrapper
-          ref: v1.6.0
+          ref: v1.7.0
           path: .wrapper-defaults
           sparse-checkout: .prompts
           sparse-checkout-cone-mode: false
@@ -224,12 +224,35 @@ jobs:
       # reviewers read it as "this PR's head branch is main" and it is one of
       # the two signals they use to recognise a dependabot PR (AT-2086).
       # `// ""` keeps an unresolvable field empty rather than letting jq print
-      # the string "null" as if it were a branch name or a login.
+      # the string "null" as if it were a branch name or a login. All four
+      # reads are guarded, not only the two AT-2086 added: a valid PR always
+      # carries a base ref and a head SHA, so the older two are not a live
+      # defect, but a partial response would otherwise hand the steps below
+      # the string "null", which is truthy everywhere -- a ref to check out, a
+      # ref to diff against, a value to print as metadata. Empty is what those
+      # steps already check for, and it survives the trip: `git fetch origin
+      # ""` in the very next step exits 0 and fetches HEAD, so the empty
+      # value passes through harmlessly and reaches the dedicated "refusing
+      # to review an unknown tree" check the step after. "null" dies at that
+      # same fetch with `couldn't find remote ref null`, before the checkout
+      # is ever reached -- naming a ref rather than the resolution that
+      # produced it. Had the empty value errored there too, the guard would
+      # have bought nothing.
       #
-      # DRIFT, deliberate: base still reads these from the event payload
-      # (base-ai-review-prepare.yml:165-166) because AT-2086 is open there. The
-      # divergence is temporary -- do not "restore" it when porting the next
-      # base release; remove it only when base carries the same fix.
+      # This step and base-ai-review-prepare.yml agree, arrived at in this
+      # order: the wrapper first (8648105, d88b0fe), base next with the same
+      # REST-resolution design (2dc5907), and this step then taking base's
+      # follow-on guard for the two older reads (4cb1a51). The design was
+      # reached on both sides; the agreement as it now stands is a port, not
+      # two independent arrivals.
+      #
+      # Nothing holds them together. This file reimplements that workflow
+      # inline rather than calling it, so the two stay equal only for as long
+      # as someone ports by hand -- the agreement is the porter's job, not a
+      # property of either repo. When porting the next base release,
+      # diff this step against base's and carry across whatever moved. A
+      # difference found here is a port that has not happened yet; do not
+      # "reconcile" it by reverting either side.
       - name: Resolve PR refs
         id: refs
         if: steps.size-check.outputs.skip == 'false'
@@ -243,8 +266,8 @@ jobs:
         run: |
           if [ -z "$BASE_REF" ]; then
             PR_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
-            BASE_REF=$(echo "$PR_JSON" | jq -r '.base.ref')
-            HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha')
+            BASE_REF=$(echo "$PR_JSON" | jq -r '.base.ref // ""')
+            HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha // ""')
             HEAD_REF=$(echo "$PR_JSON" | jq -r '.head.ref // ""')
             PR_AUTHOR=$(echo "$PR_JSON" | jq -r '.user.login // ""')
           else
