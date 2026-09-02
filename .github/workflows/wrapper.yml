@@ -128,11 +128,14 @@ jobs:
           DELETIONS=$(echo "$PR_DATA" | jq '.deletions')
           TOTAL=$((ADDITIONS + DELETIONS))
 
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "limit=$PR_SIZE_LIMIT" >> "$GITHUB_OUTPUT"
+
           if [ "$TOTAL" -gt "$PR_SIZE_LIMIT" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             gh pr comment "$PR_NUMBER" \
               --repo "${{ github.repository }}" \
-              --body "[!] PR too large (${TOTAL} lines changed). Skipping AI review -- please request manual review."
+              --body "[!] PR too large (${TOTAL} lines changed, limit ${PR_SIZE_LIMIT}). Skipping AI review -- the aggregate verdict below explains how to proceed."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -203,8 +206,12 @@ jobs:
             echo ""
           } > context.md.tmp && cat context.md >> context.md.tmp && mv context.md.tmp context.md
 
+      # Not gated on the size check: the aggregate step below runs on the
+      # size-skip path too and needs the pinned interpreter there. The pip
+      # install that follows stays gated -- aggregate_reviews.py is stdlib-only,
+      # only the reviewers need the requirements.
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
-        if: steps.size-check.outputs.skip == 'false'
+        if: always()
         with:
           python-version-file: ".ai-dev-pr-review/.github/scripts/.python-version"
 
@@ -737,10 +744,9 @@ jobs:
           fi
 
       # ====================== AGGREGATE PHASE ======================
-      # Mirrors base-ai-review-aggregate.yml. Step is gated only on the
-      # prepare phase having succeeded (skip==false), so we still post a
-      # verdict even when one or more reviewers failed or early-exited --
-      # the aggregate script handles missing review-*.json files.
+      # Mirrors base-ai-review-aggregate.yml. The aggregate step still posts a
+      # verdict when one or more reviewers failed or early-exited -- the
+      # aggregate script handles missing review-*.json files.
 
       # A reviewer that writes no verdict file has failed -- the reviewer
       # prompts require a file even for a real early exit, so a missing file
@@ -845,13 +851,36 @@ jobs:
           app-id: ${{ vars.REVIEWER_APP_ID }}
           private-key: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
 
+      # Exempt from the size gate. The reviewer steps above stay gated -- not
+      # running them is the saving the limit exists for -- but this job is the
+      # single check context the consumer rulesets require, so gating this step
+      # too made an oversize PR finish green with no review at all. The
+      # reviewers are what gets skipped, never the verdict (AT-1975).
+      #
+      # SIZE_SKIPPED makes aggregate_reviews.py short-circuit into
+      # format_size_skip_summary() before it reads any review-*.json, so the
+      # reviewer artifacts the gated steps never produced are never looked for,
+      # and the REVIEWER_RESULT_* values the gated steps never computed are
+      # never read. It posts a request_changes verdict naming the measurement
+      # and both remedies, then exits 1 -- which fails this job, so the check
+      # goes red instead of green.
+      #
+      # steps.size-check.outcome is the wrapper's analog of base's
+      # `needs.prepare.result == 'success'`: when the size check itself failed,
+      # skip is neither 'true' nor 'false' and a verdict would describe a review
+      # that never got as far as deciding whether to run. Unlike base, that
+      # leaves no unreported required context -- this job already reports the
+      # size check's own failure.
       - name: Aggregate and post verdict
-        if: steps.size-check.outputs.skip == 'false' && always()
+        if: always() && steps.size-check.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           REVIEWER_TOKEN: ${{ steps.reviewer_token.outputs.token }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          SIZE_SKIPPED: ${{ steps.size-check.outputs.skip }}
+          SIZE_TOTAL: ${{ steps.size-check.outputs.total }}
+          SIZE_LIMIT: ${{ steps.size-check.outputs.limit }}
           BOT_LOGIN: ${{ vars.BOT_LOGIN || 'github-actions[bot]' }}
           CRITICAL_THRESHOLD: ${{ vars.CRITICAL_THRESHOLD || '1' }}
           DEPENDABOT_CRITICAL_THRESHOLD: ${{ vars.DEPENDABOT_CRITICAL_THRESHOLD || '2' }}
