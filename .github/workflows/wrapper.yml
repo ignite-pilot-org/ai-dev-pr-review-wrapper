@@ -140,24 +140,40 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # head_ref and pr_author come from the same API response as the base ref
+      # and head SHA, so the dispatch path costs no extra request. Without them
+      # the metadata block below reported `github.head_ref`, which is empty on a
+      # dispatch and fell back to the BASE branch name -- not a missing value but
+      # a false one, since the reviewers read it as "this PR's head branch is
+      # main" and it is one of the signals they use to recognise a dependabot PR
+      # (AT-2086). `// ""` keeps an unresolvable field empty rather than letting
+      # jq print the string "null" as if it were a branch name or a login.
       - name: Resolve PR refs
         id: refs
         if: steps.size-check.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         run: |
           if [ -z "$BASE_REF" ]; then
             PR_JSON=$(gh pr view "$PR_NUMBER" \
-              --repo "${{ github.repository }}" --json baseRefName,headRefOid)
+              --repo "${{ github.repository }}" --json baseRefName,headRefOid,headRefName,author)
             BASE_REF=$(echo "$PR_JSON" | jq -r '.baseRefName')
             HEAD_SHA=$(echo "$PR_JSON" | jq -r '.headRefOid')
+            HEAD_REF=$(echo "$PR_JSON" | jq -r '.headRefName // ""')
+            PR_AUTHOR=$(echo "$PR_JSON" | jq -r '.author.login // ""')
           else
             HEAD_SHA="${{ github.event.pull_request.head.sha }}"
           fi
-          echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
-          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          {
+            echo "base_ref=${BASE_REF}"
+            echo "head_sha=${HEAD_SHA}"
+            echo "head_ref=${HEAD_REF}"
+            echo "pr_author=${PR_AUTHOR}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Fetch PR head (when pr_number provided manually)
         if: steps.size-check.outputs.skip == 'false' && inputs.pr_number != ''
@@ -206,8 +222,8 @@ jobs:
         env:
           BASE_REF: ${{ steps.refs.outputs.base_ref }}
           HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login || '' }}
-          HEAD_REF: ${{ github.head_ref || steps.refs.outputs.base_ref }}
+          PR_AUTHOR: ${{ steps.refs.outputs.pr_author }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
           SYSTEM_PROMPT_PATH: ${{ inputs.code-review-system-prompt-path }}
           CHECKLIST_PATH: ${{ inputs.code-review-checklist-path }}
         run: |
@@ -924,7 +940,11 @@ jobs:
           DEPENDABOT_MAJOR_CONSENSUS_OVERLAP: ${{ vars.DEPENDABOT_MAJOR_CONSENSUS_OVERLAP || '0.5' }}
           MAJOR_CONSENSUS_MIN: ${{ vars.MAJOR_CONSENSUS_MIN || '2' }}
           REVIEW_MODE: sequential
-          PR_AUTHOR: ${{ github.event.pull_request.user.login || '' }}
+          # Resolved by steps.refs so a dispatched run picks the same thresholds
+          # as the pull_request run of the same PR (AT-2086). Falls back to the
+          # event payload for the size-skip path, where steps.refs never ran --
+          # the script short-circuits before reading it there.
+          PR_AUTHOR: ${{ steps.refs.outputs.pr_author || github.event.pull_request.user.login || '' }}
           REVIEWER_RESULT_CLAUDE: ${{ steps.results.outputs.claude }}
           REVIEWER_RESULT_CODEX: ${{ steps.results.outputs.codex }}
           REVIEWER_RESULT_GEMINI: ${{ steps.results.outputs.gemini }}
