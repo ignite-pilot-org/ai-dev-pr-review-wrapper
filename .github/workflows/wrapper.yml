@@ -224,12 +224,25 @@ jobs:
       # reviewers read it as "this PR's head branch is main" and it is one of
       # the two signals they use to recognise a dependabot PR (AT-2086).
       # `// ""` keeps an unresolvable field empty rather than letting jq print
-      # the string "null" as if it were a branch name or a login.
+      # the string "null" as if it were a branch name or a login. All four
+      # reads are guarded, not only the two AT-2086 added: a valid PR always
+      # carries a base ref and a head SHA, so the older two are not a live
+      # defect, but a partial response would otherwise hand the steps below
+      # the string "null", which is truthy everywhere -- a ref to check out, a
+      # ref to diff against, a value to print as metadata. Empty is what those
+      # steps already check for, so an unresolvable head reaches the "refusing
+      # to review an unknown tree" error below rather than a git failure
+      # naming a ref called null.
       #
-      # DRIFT, deliberate: base still reads these from the event payload
-      # (base-ai-review-prepare.yml:165-166) because AT-2086 is open there. The
-      # divergence is temporary -- do not "restore" it when porting the next
-      # base release; remove it only when base carries the same fix.
+      # This step and base-ai-review-prepare.yml agree, and each arrived
+      # there on its own: the wrapper first (8648105 + d88b0fe), base after
+      # (4cb1a51). Nothing holds them together. This file reimplements that
+      # workflow inline rather than calling it, so the two stay equal only for
+      # as long as someone ports by hand -- the agreement is the porter's job,
+      # not a property of either repo. When porting the next base release,
+      # diff this step against base's and carry across whatever moved. A
+      # difference found here is a port that has not happened yet; do not
+      # "reconcile" it by reverting either side.
       - name: Resolve PR refs
         id: refs
         if: steps.size-check.outputs.skip == 'false'
