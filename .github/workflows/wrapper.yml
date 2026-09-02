@@ -165,6 +165,42 @@ jobs:
           HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
         run: git fetch origin "$HEAD_SHA"
 
+      # The caller checkout at the top of this job resolves `github.ref` when
+      # there is no pull_request payload, which on a workflow_dispatch is
+      # whatever ref the run was dispatched on -- `main` unless the caller
+      # passed --ref. The diff below is computed from the API-resolved head, so
+      # it stayed correct while the working tree did not, and nothing said so: a
+      # reviewer that opens a file read the pre-change version while its diff
+      # showed the change, and the run reported success (AT-2038).
+      #
+      # Move the tree onto the head the diff is about, then assert it. The
+      # assert is the part that has to stay: a future path that reintroduces the
+      # divergence fails here instead of reviewing the wrong tree quietly.
+      #
+      # An empty head_sha is a hard failure here, unlike base's reviewer and
+      # aggregate jobs, which exit 0 on it. There it means prepare skipped the
+      # size gate and never resolved a head -- those jobs receive head_sha as an
+      # input across a job boundary. This step is gated on the same skip
+      # condition as the resolution above, so the size-skip path never reaches
+      # it and an empty value can only mean the resolution itself produced
+      # nothing. That is base's prepare semantics, which is the step this
+      # wrapper inlines.
+      - name: Put the working tree on the PR head
+        if: steps.size-check.outputs.skip == 'false'
+        env:
+          HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
+        run: |
+          if [ -z "$HEAD_SHA" ]; then
+            echo "::error::head_sha is empty; refusing to review an unknown tree"
+            exit 1
+          fi
+          [ "$(git rev-parse HEAD)" = "$HEAD_SHA" ] || git checkout --detach "$HEAD_SHA"
+          ACTUAL=$(git rev-parse HEAD)
+          if [ "$ACTUAL" != "$HEAD_SHA" ]; then
+            echo "::error::working tree is $ACTUAL but the diff is about $HEAD_SHA"
+            exit 1
+          fi
+
       - name: Extract diff and context
         if: steps.size-check.outputs.skip == 'false'
         env:
