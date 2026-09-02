@@ -243,8 +243,8 @@ jobs:
         run: |
           if [ -z "$BASE_REF" ]; then
             PR_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
-            BASE_REF=$(echo "$PR_JSON" | jq -r '.base.ref')
-            HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha')
+            BASE_REF=$(echo "$PR_JSON" | jq -r '.base.ref // ""')
+            HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha // ""')
             HEAD_REF=$(echo "$PR_JSON" | jq -r '.head.ref // ""')
             PR_AUTHOR=$(echo "$PR_JSON" | jq -r '.user.login // ""')
           else
