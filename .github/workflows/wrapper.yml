@@ -615,15 +615,29 @@ jobs:
       # ====================== CODEX REVIEWER ======================
       # Skipped if Claude requested early_exit.
 
+      # `continue-on-error` on the two codex setup steps: without it a codex
+      # outage concluded the step `failure`, which poisoned the job status,
+      # and every later step whose `if:` carries no status-check function
+      # inherits an implicit `success()` and was skipped with it -- including
+      # the Gemini reviewer, which consumes no codex credential (AT-2114).
+      # With `continue-on-error` the step's `conclusion` is `success` so job
+      # status stays clean, while its `outcome` still records `failure`. That
+      # outcome is the discriminator: the codex steps below gate on it, so
+      # codex is skipped for a codex-shaped reason and nothing else is.
       - name: Install Codex CLI
         if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true'
+        continue-on-error: true
         # Pinned: unpinned installs pulled releases that dropped `codex exec
         # --full-auto`, breaking every codex review. Bump deliberately after
         # verifying `codex exec --help` for the new version.
         run: npm install -g @openai/codex@0.147.0
 
+      # A failed install leaves `codex login` missing, so this step fails too:
+      # its outcome is the single gate for the rest of the codex reviewer.
       - name: Authenticate Codex CLI with API key
+        id: codex-auth
         if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true'
+        continue-on-error: true
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -640,7 +654,10 @@ jobs:
 
       - name: Enable bubblewrap sandbox on Actions runner
         id: sysctl
-        if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true'
+        if: >-
+          steps.size-check.outputs.skip == 'false' &&
+          steps.claude-exit.outputs.early_exit != 'true' &&
+          steps.codex-auth.outcome == 'success'
         run: |
           orig_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
           orig_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
@@ -654,11 +671,17 @@ jobs:
           fi
 
       - name: Use trusted Codex prompt from ai-dev-pr-review
-        if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true'
+        if: >-
+          steps.size-check.outputs.skip == 'false' &&
+          steps.claude-exit.outputs.early_exit != 'true' &&
+          steps.codex-auth.outcome == 'success'
         run: cp .ai-dev-pr-review/.github/scripts/review_prompt.md "${RUNNER_TEMP}/review_prompt.md"
 
       - name: Run Codex review
-        if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true'
+        if: >-
+          steps.size-check.outputs.skip == 'false' &&
+          steps.claude-exit.outputs.early_exit != 'true' &&
+          steps.codex-auth.outcome == 'success'
         id: codex_run
         continue-on-error: true
         timeout-minutes: 10
@@ -863,11 +886,21 @@ jobs:
       # Skipped if Claude or Codex requested early_exit (matches upstream
       # sequential mode short-circuit semantics).
 
+      # `!cancelled()` suppresses the implicit `success()` this condition
+      # would otherwise carry, so Gemini depends only on the size gate and
+      # the early-exit chain -- never on whether an unrelated reviewer's
+      # credential worked. Gemini reads no codex or Claude credential, so a
+      # failure over there is not a reason to drop a third of the review
+      # (AT-2114). `!cancelled()` rather than `always()` for the same reason
+      # as the aggregate step (AT-2092): a cancelled run must review nothing.
+      # The `${{ }}` wrapper is required -- a bare leading `!` is a YAML tag
+      # indicator, not an expression.
       - name: Run Gemini review
         if: >-
+          ${{ !cancelled() &&
           steps.size-check.outputs.skip == 'false' &&
           steps.claude-exit.outputs.early_exit != 'true' &&
-          steps.codex-exit.outputs.early_exit != 'true'
+          steps.codex-exit.outputs.early_exit != 'true' }}
         continue-on-error: true
         timeout-minutes: 10
         env:
@@ -920,6 +953,29 @@ jobs:
       # reported as skipped by the step below -- matching base, where a skipped
       # reviewer job simply uploads no artifact.
       #
+      # Early exit is NOT the only legitimate skip reason (AT-2114). Codex is
+      # now gated on `steps.codex-auth.outcome`, so a failed `codex login`
+      # leaves the codex steps skipped while the chain above them ran fine.
+      # Calling that "produced no verdict file" blames the reviewer for an
+      # operational fault upstream of it, so `steps.codex_run.outcome` is read
+      # here: `skipped` means codex never started and gets a
+      # `reviewer_not_run` verdict naming the step that failed, while a codex
+      # that ran and wrote nothing keeps `reviewer_produced_no_verdict`.
+      #
+      # Only `outcome == "failure"` names the auth step. `outcome` is recorded
+      # before `continue-on-error` is applied, so a genuine auth failure is
+      # exactly `failure`; `skipped` means the auth step itself never ran --
+      # some unguarded step earlier in the job failed and took it with it --
+      # and reporting that as "authentication failed" would misattribute the
+      # outage to a credential that is fine. Everything that is not `failure`
+      # falls through to the neutral "a preceding step did not succeed".
+      #
+      # Claude and gemini need no such branch. `Emit Claude error verdict`
+      # above is `always()`, so review-claude.json exists whenever this step
+      # runs at all, and gemini's only gates are the size gate (which gates
+      # this step too) and the early-exit chain, which the nesting below
+      # already handles by leaving the file absent.
+      #
       # `!cancelled()` rather than `always()`, for the same reason as the
       # aggregate step (AT-2092) and the token step (AT-2102): the aggregate is
       # the only reader of these files, and it no longer runs on a cancelled
@@ -938,8 +994,12 @@ jobs:
       # is produced exactly as before.
       - name: Synthesize missing reviewer verdicts
         if: ${{ steps.size-check.outputs.skip == 'false' && !cancelled() }}
+        env:
+          CODEX_AUTH_OUTCOME: ${{ steps.codex-auth.outcome }}
+          CODEX_RUN_OUTCOME: ${{ steps.codex_run.outcome }}
         run: |
           set -euo pipefail
+          # The reviewer ran and wrote nothing.
           synthesize_failed_verdict() {
             local file="$1"
             local reviewer="$2"
@@ -957,13 +1017,60 @@ jobs:
               error_detail: $detail
             }' > "$file"
           }
+          # The reviewer never started, because a precondition of its own did
+          # not succeed. Name that instead of blaming the reviewer.
+          #
+          # The required check still goes green on the remaining two reviewers
+          # (MIN_REVIEWERS_FOR_VERDICT = 2 in aggregate_reviews.py) -- one
+          # reviewer's outage must not freeze 17 consumer repositories. The
+          # degradation is accepted, but it must not be silent, so it is
+          # reported twice (AT-2114):
+          #
+          #   1. a workflow warning annotation, surfaced on the run summary;
+          #   2. the reason inside `error`, which base's format_summary renders
+          #      on the verdict comment's headline as
+          #      `(codex: reviewer_not_run: authentication failed)` -- next to
+          #      the Result line, not as an `N/A` further down that a reader
+          #      glosses over. `error` is truncated to 60 characters there
+          #      (ERROR_TRUNCATE_LEN), so keep the reason short.
+          synthesize_not_run_verdict() {
+            local file="$1"
+            local reviewer="$2"
+            local reason="$3"
+            local failed_step="${4:-}"
+            local cause=""
+            if [ -n "$failed_step" ]; then
+              cause=" The step \"${failed_step}\" did not succeed."
+            fi
+            local detail="Reviewer ${reviewer} did not run: ${reason}.${cause} Its steps were skipped, so no review was performed. This is an operational fault upstream of the reviewer, not a review outcome. Check earlier steps in this job log."
+            echo "::warning title=Reviewer unavailable::${reviewer} unavailable: ${reason}.${cause} No ${reviewer} review was performed; the verdict on this PR is derived from the remaining reviewers."
+            jq -n --arg reviewer "$reviewer" --arg reason "$reason" --arg detail "$detail" '{
+              summary: ($reviewer + " did not run -- " + $detail),
+              status: "failed",
+              early_exit: false,
+              issues: [],
+              error: ("reviewer_not_run: " + $reason),
+              error_detail: $detail
+            }' > "$file"
+          }
           early_exited() {
             local file="$1"
             [ -s "$file" ] && [ "$(jq -r '.early_exit // false' "$file")" = "true" ]
           }
           synthesize_failed_verdict review-claude.json claude
           if ! early_exited review-claude.json; then
-            synthesize_failed_verdict review-codex.json codex
+            if [ ! -s review-codex.json ]; then
+              if [ "$CODEX_RUN_OUTCOME" != "skipped" ]; then
+                synthesize_failed_verdict review-codex.json codex
+              elif [ "$CODEX_AUTH_OUTCOME" = "failure" ]; then
+                synthesize_not_run_verdict review-codex.json codex \
+                  "authentication failed" \
+                  "Authenticate Codex CLI with API key"
+              else
+                synthesize_not_run_verdict review-codex.json codex \
+                  "a preceding step did not succeed"
+              fi
+            fi
             if ! early_exited review-codex.json; then
               synthesize_failed_verdict review-gemini.json gemini
             fi
