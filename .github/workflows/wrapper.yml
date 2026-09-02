@@ -230,16 +230,26 @@ jobs:
       # defect, but a partial response would otherwise hand the steps below
       # the string "null", which is truthy everywhere -- a ref to check out, a
       # ref to diff against, a value to print as metadata. Empty is what those
-      # steps already check for, so an unresolvable head reaches the "refusing
-      # to review an unknown tree" error below rather than a git failure
-      # naming a ref called null.
+      # steps already check for, and it survives the trip: `git fetch origin
+      # ""` in the very next step exits 0 and fetches HEAD, so the empty
+      # value passes through harmlessly and reaches the dedicated "refusing
+      # to review an unknown tree" check the step after. "null" dies at that
+      # same fetch with `couldn't find remote ref null`, before the checkout
+      # is ever reached -- naming a ref rather than the resolution that
+      # produced it. Had the empty value errored there too, the guard would
+      # have bought nothing.
       #
-      # This step and base-ai-review-prepare.yml agree, and each arrived
-      # there on its own: the wrapper first (8648105 + d88b0fe), base after
-      # (4cb1a51). Nothing holds them together. This file reimplements that
-      # workflow inline rather than calling it, so the two stay equal only for
-      # as long as someone ports by hand -- the agreement is the porter's job,
-      # not a property of either repo. When porting the next base release,
+      # This step and base-ai-review-prepare.yml agree, arrived at in this
+      # order: the wrapper first (8648105, d88b0fe), base next with the same
+      # REST-resolution design (2dc5907), and this step then taking base's
+      # follow-on guard for the two older reads (4cb1a51). The design was
+      # reached on both sides; the agreement as it now stands is a port, not
+      # two independent arrivals.
+      #
+      # Nothing holds them together. This file reimplements that workflow
+      # inline rather than calling it, so the two stay equal only for as long
+      # as someone ports by hand -- the agreement is the porter's job, not a
+      # property of either repo. When porting the next base release,
       # diff this step against base's and carry across whatever moved. A
       # difference found here is a port that has not happened yet; do not
       # "reconcile" it by reverting either side.
