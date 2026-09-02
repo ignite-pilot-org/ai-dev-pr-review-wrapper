@@ -63,6 +63,45 @@ jobs:
   review:
     name: AI Review (sequential)
     runs-on: ubuntu-latest
+    # Enforced by the GitHub Actions service, not by the runner: the string
+    # "exceeded the maximum execution time" appears nowhere in actions/runner,
+    # and JobRunner.cs contains no timeout handling at all. The service cancels
+    # the job, so this ceiling arrives as an ordinary cancellation and
+    # `cancelled()` becomes true -- which means the aggregate step below, gated
+    # `!cancelled()` since AT-2092, does not post a verdict.
+    #
+    # WHAT A READER WHO HIT THIS SHOULD DO. The gate still holds: the job
+    # concludes `cancelled`, which is not `success`, so a required check on this
+    # job still blocks the merge. What is missing is only the PR *comment*. The
+    # explanation is the check-run annotation GitHub attaches itself -- "The job
+    # running on runner ... has exceeded the maximum execution time of 45
+    # minutes" -- visible in the PR's Checks tab and in the job log. Re-run the
+    # job; three sequential reviewers at 10 minutes each plus checkout, prompt
+    # build and inline-comment posting sit close enough to 45 minutes that a
+    # large PR or a slow runner can reach it.
+    #
+    # WHY THE VERDICT IS NOT SIMPLY RESTORED FOR THIS CASE (AT-2103). A workflow
+    # expression cannot tell a timeout cancellation from a cancel-in-progress
+    # cancellation. Measured, not recalled:
+    #   * CancelledFunction.cs returns `jobStatus == ActionResult.Cancelled`
+    #     off JobContext.Status -- a tri-state, carrying no reason.
+    #   * `job.status` is documented as success | failure | cancelled. No
+    #     context, env var or REST field names a cancellation cause.
+    #   * JobCancelMessage (src/Sdk/DTWebApi/WebApi/JobCancelMessage.cs) has
+    #     exactly two fields, JobId and Timeout -- and that Timeout is the
+    #     cancellation grace period, not the cause. The reason never reaches
+    #     the runner, so no expression can read it.
+    # Restoring the verdict therefore cannot be conditioned on the cause. The
+    # discriminator that does work is slot ownership rather than cause --
+    # aggregate_reviews.py's `_head_is_stale()`, which base already relies on --
+    # but wiring it here means also reverting this file's `!cancelled()` to
+    # `always()`, so it is a change to AT-2092's mechanism and is tracked
+    # separately rather than smuggled in here.
+    #
+    # Step-level `timeout-minutes` is a different mechanism and is unaffected:
+    # StepsRunner.cs sets TaskResult.Failed for a step timeout, explicitly not
+    # Canceled, so a reviewer that exceeds its own 10 minutes still reaches the
+    # aggregate and still produces a failure verdict.
     timeout-minutes: 45
     steps:
       # --- Caller checkout (PR head) ---
