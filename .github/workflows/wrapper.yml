@@ -1011,6 +1011,20 @@ jobs:
           }
           # The reviewer never started, because a precondition of its own did
           # not succeed. Name that instead of blaming the reviewer.
+          #
+          # The required check still goes green on the remaining two reviewers
+          # (MIN_REVIEWERS_FOR_VERDICT = 2 in aggregate_reviews.py) -- one
+          # reviewer's outage must not freeze 17 consumer repositories. The
+          # degradation is accepted, but it must not be silent, so it is
+          # reported twice (AT-2114):
+          #
+          #   1. a workflow warning annotation, surfaced on the run summary;
+          #   2. the reason inside `error`, which base's format_summary renders
+          #      on the verdict comment's headline as
+          #      `(codex: reviewer_not_run: authentication failed)` -- next to
+          #      the Result line, not as an `N/A` further down that a reader
+          #      glosses over. `error` is truncated to 60 characters there
+          #      (ERROR_TRUNCATE_LEN), so keep the reason short.
           synthesize_not_run_verdict() {
             local file="$1"
             local reviewer="$2"
@@ -1021,13 +1035,13 @@ jobs:
               cause=" The step \"${failed_step}\" did not succeed."
             fi
             local detail="Reviewer ${reviewer} did not run: ${reason}.${cause} Its steps were skipped, so no review was performed. This is an operational fault upstream of the reviewer, not a review outcome. Check earlier steps in this job log."
-            echo "::warning title=Reviewer verdict missing::${detail}"
-            jq -n --arg reviewer "$reviewer" --arg detail "$detail" '{
+            echo "::warning title=Reviewer unavailable::${reviewer} unavailable: ${reason}.${cause} No ${reviewer} review was performed; the verdict on this PR is derived from the remaining reviewers."
+            jq -n --arg reviewer "$reviewer" --arg reason "$reason" --arg detail "$detail" '{
               summary: ($reviewer + " did not run -- " + $detail),
               status: "failed",
               early_exit: false,
               issues: [],
-              error: "reviewer_not_run",
+              error: ("reviewer_not_run: " + $reason),
               error_detail: $detail
             }' > "$file"
           }
@@ -1038,7 +1052,7 @@ jobs:
           if [ ! -s review-claude.json ]; then
             if [ "$CLAUDE_RUN_OUTCOME" = "skipped" ]; then
               synthesize_not_run_verdict review-claude.json claude \
-                "a preceding step in this job did not succeed"
+                "a preceding step did not succeed"
             else
               synthesize_failed_verdict review-claude.json claude
             fi
@@ -1053,7 +1067,7 @@ jobs:
                   "Authenticate Codex CLI with API key"
               else
                 synthesize_not_run_verdict review-codex.json codex \
-                  "a preceding step in this job did not succeed"
+                  "a preceding step did not succeed"
               fi
             fi
             if ! early_exited review-codex.json; then
