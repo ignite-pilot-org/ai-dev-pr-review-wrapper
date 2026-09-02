@@ -840,8 +840,25 @@ jobs:
       # were never expected to write anything, so they stay absent and are
       # reported as skipped by the step below -- matching base, where a skipped
       # reviewer job simply uploads no artifact.
+      #
+      # `!cancelled()` rather than `always()`, for the same reason as the
+      # aggregate step (AT-2092) and the token step (AT-2102): the aggregate is
+      # the only reader of these files, and it no longer runs on a cancelled
+      # run. Under `always()` a cancelled run still fabricated three
+      # `reviewer_produced_no_verdict` verdicts and three `Reviewer verdict
+      # missing` warning annotations, blaming reviewers that were merely
+      # cancelled, and the artifact upload below -- still `always()`, because a
+      # partial artifact is evidence rather than a claim -- shipped them. A
+      # cancelled run should report nothing, not report a failure that did not
+      # happen.
+      #
+      # Only cancellation is excluded. A reviewer that exceeds its own
+      # step-level `timeout-minutes` leaves the job in `failure`, not
+      # `cancelled` (actions/runner StepsRunner.cs sets TaskResult.Failed for a
+      # step timeout), so the synthesized failure verdict this step exists for
+      # is produced exactly as before.
       - name: Synthesize missing reviewer verdicts
-        if: steps.size-check.outputs.skip == 'false' && always()
+        if: ${{ steps.size-check.outputs.skip == 'false' && !cancelled() }}
         run: |
           set -euo pipefail
           synthesize_failed_verdict() {
@@ -873,9 +890,11 @@ jobs:
             fi
           fi
 
+      # `!cancelled()` for the same reason: steps.results.outputs.* is read only
+      # by the aggregate step's env, which is itself `!cancelled()`.
       - name: Compute reviewer result statuses
         id: results
-        if: steps.size-check.outputs.skip == 'false' && always()
+        if: ${{ steps.size-check.outputs.skip == 'false' && !cancelled() }}
         run: |
           set -euo pipefail
           # Derive success/failure/skipped per reviewer for the aggregate
