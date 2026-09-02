@@ -68,25 +68,42 @@ jobs:
     # and JobRunner.cs contains no timeout handling at all. The service cancels
     # the job, so this ceiling arrives as an ordinary cancellation and
     # `cancelled()` becomes true -- which means the aggregate step below, gated
-    # `!cancelled()` since AT-2092, does not post a verdict.
+    # `!cancelled()` since AT-2092, does not post a verdict. That last step is
+    # inferred from the runner source cited below, not observed: no run in these
+    # repositories has reached the 45-minute ceiling to sample.
     #
     # WHAT A READER WHO HIT THIS SHOULD DO. The gate still holds: the job
     # concludes `cancelled`, which is not `success`, so a required check on this
     # job still blocks the merge. What is missing is only the PR *comment*. The
-    # explanation is the check-run annotation GitHub attaches itself -- "The job
-    # running on runner ... has exceeded the maximum execution time of 45
-    # minutes" -- visible in the PR's Checks tab and in the job log. Re-run the
-    # job; three sequential reviewers at 10 minutes each plus checkout, prompt
-    # build and inline-comment posting sit close enough to 45 minutes that a
-    # large PR or a slow runner can reach it.
+    # explanation is the check-run annotation GitHub attaches itself, naming the
+    # maximum execution time -- visible in the PR's Checks tab and in the job
+    # log. Read it for its sense rather than matching a fixed string: the
+    # wording is unversioned UI text and has already changed format once.
+    # Re-run the job; three sequential reviewers at 10 minutes each plus
+    # checkout, prompt build and inline-comment posting sit close enough to 45
+    # minutes that a large PR or a slow runner can reach it.
     #
     # WHY THE VERDICT IS NOT SIMPLY RESTORED FOR THIS CASE (AT-2103). A workflow
     # expression cannot tell a timeout cancellation from a cancel-in-progress
     # cancellation. Measured, not recalled:
-    #   * CancelledFunction.cs returns `jobStatus == ActionResult.Cancelled`
-    #     off JobContext.Status -- a tri-state, carrying no reason.
+    #   * CancelledFunction.cs holds two classes -- CancelledFunction and
+    #     NewCancelledFunction, the new expression SDK's path -- with identical
+    #     bodies: both return `jobStatus == ActionResult.Cancelled` read off
+    #     JobContext.Status. That is one ActionResult value (Success, Failure,
+    #     Cancelled, Skipped), carrying no reason.
     #   * `job.status` is documented as success | failure | cancelled. No
-    #     context, env var or REST field names a cancellation cause.
+    #     expression context and no env var names a cancellation cause, so a
+    #     job cannot branch on one while it runs.
+    #   * REST is the one place a distinct value exists, and it does not help.
+    #     `job.conclusion` carries `timed_out` separately from `cancelled`
+    #     (github/rest-api-description, components.schemas.job). That value is
+    #     check-run inherited surface a third-party app can set; Actions does
+    #     not use `timed_out` for a `timeout-minutes` overrun -- unverified by
+    #     observation, since no timeout-cancelled job exists in these
+    #     repositories to sample. Either way `conclusion` is a post-hoc REST
+    #     field, not an expression context: a running job cannot read its own,
+    #     so it cannot rescue an in-run decision. No REST field on the job,
+    #     run or check-run schema names a cancellation *reason* at all.
     #   * JobCancelMessage (src/Sdk/DTWebApi/WebApi/JobCancelMessage.cs) has
     #     exactly two fields, JobId and Timeout -- and that Timeout is the
     #     cancellation grace period, not the cause. The reason never reaches
