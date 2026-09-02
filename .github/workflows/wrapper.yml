@@ -949,8 +949,28 @@ jobs:
       # that never got as far as deciding whether to run. Unlike base, that
       # leaves no unreported required context -- this job already reports the
       # size check's own failure.
+      #
+      # `!cancelled()` rather than `always()`: the concurrency group above sets
+      # cancel-in-progress, so pushing a new commit cancels the run in flight.
+      # Under `always()` that dying run still reached this step, found the
+      # verdict files its cancelled reviewers never wrote, and posted
+      # "0/3 LLM responses -- all failed" with exit 1 against a PR that had
+      # nothing wrong with it. Worse, the cancelled run and its replacement race
+      # for the same comment slot with no ordering guarantee, so a late
+      # cancelled verdict overwrites the live run's correct one -- and
+      # _minimize_stale_bot_items folds the older item on the assumption that
+      # the newest verdict is the right one, which is exactly what the late
+      # arrival breaks.
+      #
+      # `!cancelled()` is a status check function, so it still suppresses the
+      # implicit `success()` that would otherwise gate this step on every
+      # preceding step having passed. Reporting failed reviewers (AT-1837,
+      # AT-1979) therefore works unchanged: a failed reviewer leaves the run
+      # in `failure`, where `cancelled()` is false. Only cancellation is
+      # excluded. The `${{ }}` wrapper is required -- a bare leading `!` is a
+      # YAML tag indicator, not an expression.
       - name: Aggregate and post verdict
-        if: always() && steps.size-check.outcome == 'success'
+        if: ${{ !cancelled() && steps.size-check.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REVIEWER_TOKEN: ${{ steps.reviewer_token.outputs.token }}
