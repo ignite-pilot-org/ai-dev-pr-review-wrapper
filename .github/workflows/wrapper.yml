@@ -89,11 +89,22 @@ jobs:
       # --- Wrapper canonical default prompts (fallback) ---
       # Sparse-checkout of this wrapper repo's own .prompts/ directory, used
       # when the consumer has no per-repo prompt files on either branch.
-      - name: Checkout wrapper canonical default prompts
+      #
+      # WARNING: ref below is hardcoded to this release's tag. When cutting a new
+      # version, FIRST bump this literal to the new tag in a release PR, THEN tag
+      # that commit. Both github.workflow_ref and github.workflow_sha return the
+      # caller's context inside a reusable workflow (not the reusable's own
+      # ref/SHA), so hardcoding is the only reliable mechanism.
+      #
+      # It used to read `main`, so a consumer pinned to an older wrapper release
+      # still got whatever prompts main happened to carry at run time -- the
+      # prompts drive the review outcome, so that put them outside the lockstep
+      # the header above declares (AT-1957).
+      - name: Checkout wrapper canonical default prompts (pinned to release tag)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: ignite-pilot-org/ai-dev-pr-review-wrapper
-          ref: main
+          ref: v1.6.0
           path: .wrapper-defaults
           sparse-checkout: .prompts
           sparse-checkout-cone-mode: false
