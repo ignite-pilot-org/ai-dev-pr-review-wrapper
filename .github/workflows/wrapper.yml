@@ -954,6 +954,21 @@ jobs:
       # reported as skipped by the step below -- matching base, where a skipped
       # reviewer job simply uploads no artifact.
       #
+      # Early exit is NOT the only legitimate skip reason (AT-2114). A reviewer
+      # whose own precondition failed -- codex after a failed `codex login` --
+      # never ran either, and calling that "produced no verdict file" blames the
+      # reviewer for an operational fault upstream of it. The reviewer step
+      # outcomes below are the discriminator: `skipped` on a reviewer the chain
+      # did reach means the reviewer never started, so it gets a
+      # `reviewer_not_run` verdict naming the step that failed, while a reviewer
+      # that ran and wrote nothing keeps `reviewer_produced_no_verdict`.
+      #
+      # A reviewer skipped by the chain is still left absent, so
+      # `reviewer_result` below reaches its `[ ! -s "$file" ] -> "skipped"`
+      # branch and base's aggregate renders `N/A -- skipped`
+      # (aggregate_reviews.py `_CONCLUSION_REASON`, `format_summary`), which is
+      # already honest. Fabricating a file there is what defeated it.
+      #
       # `!cancelled()` rather than `always()`, for the same reason as the
       # aggregate step (AT-2092) and the token step (AT-2102): the aggregate is
       # the only reader of these files, and it no longer runs on a cancelled
@@ -972,14 +987,17 @@ jobs:
       # is produced exactly as before.
       - name: Synthesize missing reviewer verdicts
         if: ${{ steps.size-check.outputs.skip == 'false' && !cancelled() }}
+        env:
+          CLAUDE_RUN_OUTCOME: ${{ steps.claude-review.outcome }}
+          CODEX_AUTH_OUTCOME: ${{ steps.codex-auth.outcome }}
+          CODEX_RUN_OUTCOME: ${{ steps.codex_run.outcome }}
+          GEMINI_RUN_OUTCOME: ${{ steps.gemini-run.outcome }}
         run: |
           set -euo pipefail
+          # The reviewer ran and wrote nothing.
           synthesize_failed_verdict() {
             local file="$1"
             local reviewer="$2"
-            if [ -s "$file" ]; then
-              return 0
-            fi
             local detail="Reviewer ${reviewer} produced no verdict file (${file}). Possible causes: a step before the reviewer failed, the reviewer CLI or action crashed, the step timed out, or the runner ran out of resources. Check earlier steps in this job log."
             echo "::warning title=Reviewer verdict missing::${detail}"
             jq -n --arg reviewer "$reviewer" --arg detail "$detail" '{
@@ -991,15 +1009,65 @@ jobs:
               error_detail: $detail
             }' > "$file"
           }
+          # The reviewer never started, because a precondition of its own did
+          # not succeed. Name that instead of blaming the reviewer.
+          synthesize_not_run_verdict() {
+            local file="$1"
+            local reviewer="$2"
+            local reason="$3"
+            local failed_step="${4:-}"
+            local cause=""
+            if [ -n "$failed_step" ]; then
+              cause=" The step \"${failed_step}\" did not succeed."
+            fi
+            local detail="Reviewer ${reviewer} did not run: ${reason}.${cause} Its steps were skipped, so no review was performed. This is an operational fault upstream of the reviewer, not a review outcome. Check earlier steps in this job log."
+            echo "::warning title=Reviewer verdict missing::${detail}"
+            jq -n --arg reviewer "$reviewer" --arg detail "$detail" '{
+              summary: ($reviewer + " did not run -- " + $detail),
+              status: "failed",
+              early_exit: false,
+              issues: [],
+              error: "reviewer_not_run",
+              error_detail: $detail
+            }' > "$file"
+          }
           early_exited() {
             local file="$1"
             [ -s "$file" ] && [ "$(jq -r '.early_exit // false' "$file")" = "true" ]
           }
-          synthesize_failed_verdict review-claude.json claude
+          if [ ! -s review-claude.json ]; then
+            if [ "$CLAUDE_RUN_OUTCOME" = "skipped" ]; then
+              synthesize_not_run_verdict review-claude.json claude \
+                "a preceding step in this job did not succeed"
+            else
+              synthesize_failed_verdict review-claude.json claude
+            fi
+          fi
           if ! early_exited review-claude.json; then
-            synthesize_failed_verdict review-codex.json codex
+            if [ ! -s review-codex.json ]; then
+              if [ "$CODEX_RUN_OUTCOME" != "skipped" ]; then
+                synthesize_failed_verdict review-codex.json codex
+              elif [ "$CODEX_AUTH_OUTCOME" != "success" ]; then
+                synthesize_not_run_verdict review-codex.json codex \
+                  "authentication failed" \
+                  "Authenticate Codex CLI with API key"
+              else
+                synthesize_not_run_verdict review-codex.json codex \
+                  "a preceding step in this job did not succeed"
+              fi
+            fi
             if ! early_exited review-codex.json; then
-              synthesize_failed_verdict review-gemini.json gemini
+              if [ ! -s review-gemini.json ]; then
+                if [ "$GEMINI_RUN_OUTCOME" = "skipped" ]; then
+                  # Gemini's only remaining gates are the size gate (which gates
+                  # this step too) and the early-exit chain (handled above), so a
+                  # skip reaching here is the chain's doing. Leave the file
+                  # absent: the aggregate reports it as skipped, which is true.
+                  echo "::notice::gemini was skipped and wrote no verdict -- leaving it absent so the aggregate reports it as skipped"
+                else
+                  synthesize_failed_verdict review-gemini.json gemini
+                fi
+              fi
             fi
           fi
 
