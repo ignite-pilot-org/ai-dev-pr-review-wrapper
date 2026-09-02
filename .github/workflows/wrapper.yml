@@ -920,9 +920,24 @@ jobs:
       # an APPROVED review, so when REVIEWER_APP_ID is configured we mint an App
       # installation token and hand it to the aggregate script for the approve
       # call only. Skipped entirely when the var is unset (backward compatible).
+      #
+      # `!cancelled()` rather than `always()`, matching the aggregate step below
+      # (AT-2092). This step mints a real GitHub App installation token, and its
+      # only consumer is that aggregate step -- which no longer runs on a
+      # cancelled run, so under `always()` the token was minted for nobody.
+      # actions/create-github-app-token revokes the token in its post step, but
+      # cancellation gives post steps only the SIGINT grace window; a post step
+      # that does not finish inside it leaves an unrevoked token alive for its
+      # 1h TTL. Not minting it is the only way to be sure there is nothing to
+      # revoke. Cancellation is frequent -- cancel-in-progress kills the run in
+      # flight on every new commit -- so this is not a rare path (AT-2102).
+      #
+      # `!cancelled()` is a status check function just as `always()` is, so the
+      # implicit `success()` stays suppressed: a run in which a reviewer failed
+      # is `failure`, not `cancelled`, and still mints the token as before.
       - name: Mint reviewer App token
         id: reviewer_token
-        if: ${{ steps.size-check.outputs.skip == 'false' && always() && vars.REVIEWER_APP_ID != '' }}
+        if: ${{ steps.size-check.outputs.skip == 'false' && !cancelled() && vars.REVIEWER_APP_ID != '' }}
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
         continue-on-error: true
         with:
