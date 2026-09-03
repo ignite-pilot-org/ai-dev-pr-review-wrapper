@@ -591,6 +591,8 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           REVIEWER: claude
           JACCARD_THRESHOLD: ${{ vars.JACCARD_THRESHOLD || '0.6' }}
+          ROUND_CUTOFF_N: ${{ vars.ROUND_CUTOFF_N || '5' }}
+          ROUND_CUTOFF_ENABLED: ${{ vars.ROUND_CUTOFF_ENABLED || 'true' }}
         run: |
           if [ -f review-claude.json ]; then
             python3 .ai-dev-pr-review/.github/scripts/post_inline_comments.py \
@@ -861,6 +863,8 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           REVIEWER: codex
           JACCARD_THRESHOLD: ${{ vars.JACCARD_THRESHOLD || '0.6' }}
+          ROUND_CUTOFF_N: ${{ vars.ROUND_CUTOFF_N || '5' }}
+          ROUND_CUTOFF_ENABLED: ${{ vars.ROUND_CUTOFF_ENABLED || 'true' }}
         run: |
           if [ -f review-codex.json ]; then
             python3 .ai-dev-pr-review/.github/scripts/post_inline_comments.py \
@@ -923,6 +927,8 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           REVIEWER: gemini
           JACCARD_THRESHOLD: ${{ vars.JACCARD_THRESHOLD || '0.6' }}
+          ROUND_CUTOFF_N: ${{ vars.ROUND_CUTOFF_N || '5' }}
+          ROUND_CUTOFF_ENABLED: ${{ vars.ROUND_CUTOFF_ENABLED || 'true' }}
         run: |
           if [ -f review-gemini.json ]; then
             python3 .ai-dev-pr-review/.github/scripts/post_inline_comments.py \
