@@ -85,29 +85,49 @@ jobs:
   review:
     name: AI Review (sequential)
     runs-on: ubuntu-latest
-    # Enforced by the GitHub Actions service, not by the runner: the string
-    # "exceeded the maximum execution time" appears nowhere in actions/runner,
-    # and JobRunner.cs contains no timeout handling at all. The service cancels
-    # the job, so this ceiling arrives as an ordinary cancellation and
-    # `cancelled()` becomes true -- which means the aggregate step below, gated
-    # `!cancelled()` since AT-2092, does not post a verdict. That last step is
-    # inferred from the runner source cited below, not observed: no run in these
-    # repositories has reached the 45-minute ceiling to sample.
+    # AT-2103: this ceiling is now an outer backstop, not the enforcement
+    # mechanism. Before this fix it *was* the mechanism -- the only timeout on
+    # the job -- and hitting it cancelled the whole job server-side (the
+    # string "exceeded the maximum execution time" appears nowhere in
+    # actions/runner, and JobRunner.cs contains no timeout handling at all: the
+    # GitHub Actions service does the cancelling, not the runner). That made
+    # `cancelled()` true, which since AT-2092 meant the aggregate step below,
+    # gated `!cancelled()`, silently posted no verdict. The required check
+    # still held the gate (a `cancelled` job is not `success`, so merge stayed
+    # blocked) but the developer had no explanation on the PR, only in the
+    # Actions log -- three sequential reviewers at 10 minutes each plus
+    # checkout, prompt build and inline-comment posting sit close enough to a
+    # 45-minute ceiling that a large PR or a slow runner could reach it.
     #
-    # WHAT A READER WHO HIT THIS SHOULD DO. The gate still holds: the job
-    # concludes `cancelled`, which is not `success`, so a required check on this
-    # job still blocks the merge. What is missing is only the PR *comment*. The
-    # explanation is the check-run annotation GitHub attaches itself, naming the
-    # maximum execution time -- visible in the PR's Checks tab and in the job
-    # log. Read it for its sense rather than matching a fixed string: the
-    # wording is unversioned UI text and has already changed format once.
-    # Re-run the job; three sequential reviewers at 10 minutes each plus
-    # checkout, prompt build and inline-comment posting sit close enough to 45
-    # minutes that a large PR or a slow runner can reach it.
+    # The fix: every step below now carries its own `timeout-minutes`, summing
+    # to ~159 minutes across the full sequential chain (checkout/install/
+    # prompt-building/comment-posting steps at 2-5 min each, the three
+    # reviewer invocations at 10 min each, aggregate at 10 min).
+    # StepsRunner.cs sets TaskResult.Failed for a step that exceeds its own
+    # timeout -- explicitly not Canceled -- so a slow step no longer cancels
+    # the job; it fails, and `!cancelled()`-gated steps (importantly
+    # "Aggregate and post verdict") still run and post a verdict. That
+    # verdict names the reviewer that produced no output (it comes from
+    # "Emit Claude error verdict" or synthesize_failed_verdict below, which
+    # list a timeout as one of several possible causes); the words "timed
+    # out" and the step name appear only in the job-log annotation, not in
+    # the posted verdict.
     #
-    # WHY THE VERDICT IS NOT SIMPLY RESTORED FOR THIS CASE (AT-2103). A workflow
-    # expression cannot tell a timeout cancellation from a cancel-in-progress
-    # cancellation. Measured, not recalled:
+    # The 180 below is an outer safety net, not a budget: comfortably above
+    # the ~159-minute sum of step ceilings so it should not fire under normal
+    # operation (actual run time sits far below that sum -- most steps finish
+    # in seconds, not at their ceiling), while still bounding a genuinely
+    # stuck job with no step of its own currently over budget (a hang between
+    # steps, or in runner/action setup that no step's own timeout covers). If
+    # this outer ceiling ever does fire, the job is cancelled exactly as
+    # before AT-2103 -- `cancelled()` true, no verdict posted -- which is why
+    # the per-step timeouts above are what actually carries this fix, not this
+    # number.
+    #
+    # WHY THE VERDICT IS NOT SIMPLY RESTORED FOR THE CASE WHERE THIS OUTER
+    # CEILING DOES FIRE. A workflow expression cannot tell a timeout
+    # cancellation from a cancel-in-progress cancellation. Measured, not
+    # recalled:
     #   * CancelledFunction.cs holds two classes -- CancelledFunction and
     #     NewCancelledFunction, the new expression SDK's path -- with identical
     #     bodies: both return `jobStatus == ActionResult.Cancelled` read off
@@ -120,9 +140,16 @@ jobs:
     #     `job.conclusion` carries `timed_out` separately from `cancelled`
     #     (github/rest-api-description, components.schemas.job). That value is
     #     check-run inherited surface a third-party app can set; Actions does
-    #     not use `timed_out` for a `timeout-minutes` overrun -- unverified by
-    #     observation, since no timeout-cancelled job exists in these
-    #     repositories to sample. Either way `conclusion` is a post-hoc REST
+    #     not use `timed_out` for an execution-time overrun -- observed, not
+    #     inferred: two org jobs hit the default 6h ceiling in non-review
+    #     workflows (same service-side path as a `timeout-minutes` overrun,
+    #     not a review-workflow incident) -- ignite-corp/ai-dev-qa-partner
+    #     job 95942922749 (run 32210786688) and ignite-corp/ai-tf-t2a job
+    #     75733659295 (run 25784225584). Both concluded `cancelled` with the
+    #     annotation "The job has exceeded the maximum execution time of
+    #     6h0m0s"; the qa-partner job (step data still retained) shows the
+    #     in-flight step `cancelled`, every later step `skipped`, and the
+    #     Post steps still run. Either way `conclusion` is a post-hoc REST
     #     field, not an expression context: a running job cannot read its own,
     #     so it cannot rescue an in-run decision. No REST field on the job,
     #     run or check-run schema names a cancellation *reason* at all.
@@ -136,17 +163,13 @@ jobs:
     # but wiring it here means also reverting this file's `!cancelled()` to
     # `always()`, so it is a change to AT-2092's mechanism and is tracked
     # separately rather than smuggled in here.
-    #
-    # Step-level `timeout-minutes` is a different mechanism and is unaffected:
-    # StepsRunner.cs sets TaskResult.Failed for a step timeout, explicitly not
-    # Canceled, so a reviewer that exceeds its own 10 minutes still reaches the
-    # aggregate and still produces a failure verdict.
-    timeout-minutes: 45
+    timeout-minutes: 180
     steps:
       # --- Caller checkout (PR head) ---
       # Provides the consumer repo prompt files + lets codex CLI / claude
       # action see the workspace.
       - name: Checkout caller repo (PR head)
+        timeout-minutes: 5
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
@@ -158,6 +181,7 @@ jobs:
       # actions/checkout works regardless of org plan or caller visibility
       # (not a Free-plan-specific allowance -- see the header comment).
       - name: Checkout ai-dev-pr-review scripts
+        timeout-minutes: 5
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: ignite-corp/ai-dev-pr-review
@@ -180,6 +204,7 @@ jobs:
       # prompts drive the review outcome, so that put them outside the lockstep
       # the header above declares (AT-1957).
       - name: Checkout wrapper canonical default prompts (pinned to release tag)
+        timeout-minutes: 5
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: ignite-pilot-org/ai-dev-pr-review-wrapper
@@ -192,6 +217,7 @@ jobs:
       # Mirrors base-ai-review-prepare.yml inline so we run in a single job.
 
       - name: Validate PR number
+        timeout-minutes: 2
         env:
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         run: |
@@ -202,6 +228,7 @@ jobs:
 
       - name: Check PR size
         id: size-check
+        timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
           PR_SIZE_LIMIT: ${{ vars.PR_SIZE_LIMIT || '3000' }}
@@ -279,6 +306,7 @@ jobs:
       - name: Resolve PR refs
         id: refs
         if: steps.size-check.outputs.skip == 'false'
+        timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_REF: ${{ github.base_ref }}
@@ -305,6 +333,7 @@ jobs:
 
       - name: Fetch PR head (when pr_number provided manually)
         if: steps.size-check.outputs.skip == 'false' && inputs.pr_number != ''
+        timeout-minutes: 3
         env:
           HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
         run: git fetch origin "$HEAD_SHA"
@@ -331,6 +360,7 @@ jobs:
       # wrapper inlines.
       - name: Put the working tree on the PR head
         if: steps.size-check.outputs.skip == 'false'
+        timeout-minutes: 3
         env:
           HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
         run: |
@@ -347,6 +377,7 @@ jobs:
 
       - name: Extract diff and context
         if: steps.size-check.outputs.skip == 'false'
+        timeout-minutes: 5
         env:
           BASE_REF: ${{ steps.refs.outputs.base_ref }}
           HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
@@ -392,15 +423,18 @@ jobs:
       # only the reviewers need the requirements.
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         if: always()
+        timeout-minutes: 3
         with:
           python-version-file: ".ai-dev-pr-review/.github/scripts/.python-version"
 
       - name: Install upstream Python deps
         if: steps.size-check.outputs.skip == 'false'
+        timeout-minutes: 5
         run: pip install -r .ai-dev-pr-review/.github/scripts/requirements.txt
 
       - name: Append prior review context
         if: steps.size-check.outputs.skip == 'false'
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
@@ -409,6 +443,7 @@ jobs:
 
       - name: Append verified action SHA pins
         if: steps.size-check.outputs.skip == 'false'
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 .ai-dev-pr-review/.github/scripts/verify_action_shas.py
@@ -416,6 +451,7 @@ jobs:
       - name: Collect unresolved review threads
         if: steps.size-check.outputs.skip == 'false'
         continue-on-error: true
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
@@ -425,6 +461,7 @@ jobs:
       - name: Load unresolved review threads
         id: load-threads
         if: steps.size-check.outputs.skip == 'false'
+        timeout-minutes: 2
         run: |
           THREADS_FILE=".review-context/unresolved-threads.json"
           if [ -f "$THREADS_FILE" ]; then
@@ -448,6 +485,7 @@ jobs:
 
       - name: Build Claude prompt with existing threads
         if: steps.size-check.outputs.skip == 'false'
+        timeout-minutes: 3
         env:
           THREAD_COUNT: ${{ steps.load-threads.outputs.thread_count }}
           EXISTING_COMMENTS: ${{ steps.load-threads.outputs.existing_comments }}
@@ -549,6 +587,7 @@ jobs:
       - name: Extract Claude review from execution log (fallback)
         if: steps.size-check.outputs.skip == 'false' && always()
         continue-on-error: true
+        timeout-minutes: 3
         env:
           EXEC_FILE: ${{ steps.claude-review.outputs.execution_file }}
         run: |
@@ -578,6 +617,7 @@ jobs:
       # if we cannot even record the failure, the job must not report success.
       - name: Emit Claude error verdict (no verdict file)
         if: steps.size-check.outputs.skip == 'false' && always()
+        timeout-minutes: 2
         env:
           EXEC_FILE: ${{ steps.claude-review.outputs.execution_file }}
           STEP_OUTCOME: ${{ steps.claude-review.outcome }}
@@ -608,6 +648,7 @@ jobs:
       - name: Post Claude inline comments
         if: ${{ steps.size-check.outputs.skip == 'false' && !cancelled() }}
         continue-on-error: true
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
@@ -629,6 +670,7 @@ jobs:
       - name: Read Claude early_exit
         id: claude-exit
         if: steps.size-check.outputs.skip == 'false' && always()
+        timeout-minutes: 2
         run: |
           if [ -f review-claude.json ]; then
             EARLY_EXIT=$(jq -r '.early_exit // false' review-claude.json)
@@ -655,6 +697,7 @@ jobs:
         # Pinned: unpinned installs pulled releases that dropped `codex exec
         # --full-auto`, breaking every codex review. Bump deliberately after
         # verifying `codex exec --help` for the new version.
+        timeout-minutes: 5
         run: npm install -g @openai/codex@0.147.0
 
       # A failed install leaves `codex login` missing, so this step fails too:
@@ -663,6 +706,7 @@ jobs:
         id: codex-auth
         if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true'
         continue-on-error: true
+        timeout-minutes: 2
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -683,6 +727,7 @@ jobs:
           steps.size-check.outputs.skip == 'false' &&
           steps.claude-exit.outputs.early_exit != 'true' &&
           steps.codex-auth.outcome == 'success'
+        timeout-minutes: 2
         run: |
           orig_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
           orig_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
@@ -700,6 +745,7 @@ jobs:
           steps.size-check.outputs.skip == 'false' &&
           steps.claude-exit.outputs.early_exit != 'true' &&
           steps.codex-auth.outcome == 'success'
+        timeout-minutes: 2
         run: cp .ai-dev-pr-review/.github/scripts/review_prompt.md "${RUNNER_TEMP}/review_prompt.md"
 
       - name: Run Codex review
@@ -836,6 +882,7 @@ jobs:
       - name: Upload Codex logs
         if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true' && always()
         continue-on-error: true
+        timeout-minutes: 5
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: codex-logs-${{ github.run_id }}-${{ github.run_attempt }}
@@ -848,6 +895,7 @@ jobs:
 
       - name: Restore sysctl after Codex
         if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true' && always()
+        timeout-minutes: 2
         env:
           ORIG_USERNS: ${{ steps.sysctl.outputs.orig_userns }}
           ORIG_APPARMOR: ${{ steps.sysctl.outputs.orig_apparmor }}
@@ -861,6 +909,7 @@ jobs:
 
       - name: Normalize Codex review file name
         if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true' && always()
+        timeout-minutes: 2
         run: |
           EXPECTED="review-codex.json"
           if [ ! -f "$EXPECTED" ]; then
@@ -880,6 +929,7 @@ jobs:
       - name: Post Codex inline comments
         if: ${{ steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true' && !cancelled() }}
         continue-on-error: true
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
@@ -901,6 +951,7 @@ jobs:
       - name: Read Codex early_exit
         id: codex-exit
         if: steps.size-check.outputs.skip == 'false' && always()
+        timeout-minutes: 2
         run: |
           if [ -f review-codex.json ]; then
             EARLY_EXIT=$(jq -r '.early_exit // false' review-codex.json)
@@ -944,6 +995,7 @@ jobs:
           steps.codex-exit.outputs.early_exit != 'true' &&
           !cancelled() }}
         continue-on-error: true
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
@@ -1023,6 +1075,7 @@ jobs:
       # is produced exactly as before.
       - name: Synthesize missing reviewer verdicts
         if: ${{ steps.size-check.outputs.skip == 'false' && !cancelled() }}
+        timeout-minutes: 3
         env:
           CODEX_AUTH_OUTCOME: ${{ steps.codex-auth.outcome }}
           CODEX_RUN_OUTCOME: ${{ steps.codex_run.outcome }}
@@ -1110,6 +1163,7 @@ jobs:
       - name: Compute reviewer result statuses
         id: results
         if: ${{ steps.size-check.outputs.skip == 'false' && !cancelled() }}
+        timeout-minutes: 2
         run: |
           set -euo pipefail
           # Derive success/failure/skipped per reviewer for the aggregate
@@ -1172,6 +1226,7 @@ jobs:
       - name: Mint reviewer App token
         id: reviewer_token
         if: ${{ steps.size-check.outputs.skip == 'false' && !cancelled() && vars.REVIEWER_APP_ID != '' }}
+        timeout-minutes: 3
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
         continue-on-error: true
         with:
@@ -1220,6 +1275,7 @@ jobs:
       # YAML tag indicator, not an expression.
       - name: Aggregate and post verdict
         if: ${{ !cancelled() && steps.size-check.outcome == 'success' }}
+        timeout-minutes: 10
         env:
           GH_TOKEN: ${{ github.token }}
           REVIEWER_TOKEN: ${{ steps.reviewer_token.outputs.token }}
@@ -1250,6 +1306,7 @@ jobs:
 
       - name: Upload review artifacts
         if: always()
+        timeout-minutes: 5
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: reviews-${{ github.run_id }}-${{ github.run_attempt }}
