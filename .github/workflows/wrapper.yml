@@ -1,13 +1,35 @@
 name: AI Review Wrapper
 
-# Same-org reusable workflow that wraps ignite-corp/ai-dev-pr-review.
-# Exists because GitHub Free plan blocks pilot-org private consumer repos
-# from calling the upstream reusable workflow directly (cross-org), but
-# allows same-org reusable workflow calls and allows actions/checkout of
-# the upstream PUBLIC repo. So this wrapper sits in ignite-pilot-org and
-# re-implements the orchestrator by checking out upstream scripts and
-# running the same logic inline. The wrapper preserves the upstream
-# orchestrator's input/secret contract for drop-in replacement.
+# Same-org reusable workflow that wraps ignite-corp/ai-dev-pr-review, sitting
+# in ignite-pilot-org and re-implementing the orchestrator by checking out
+# upstream scripts and running the same logic inline. It preserves the
+# upstream orchestrator's input/secret contract for drop-in replacement.
+#
+# NOT because a private caller can't call a public reusable workflow
+# cross-org -- it can. GitHub Actions gates reusable-workflow calls on the
+# *called* workflow's visibility, not the caller's, and not on plan: a
+# PUBLIC reusable workflow is callable from a workflow_call in any org's
+# repo regardless of that caller's own visibility; only private/internal
+# reusable workflows restrict callers to the same org (AT-1210's visibility
+# table). ignite-corp/ai-dev-pr-review is public, so
+# ignite-pilot-org/spec-interview and .../factory-process-maker call its
+# orchestrator directly, cross-org, without this wrapper, and have done so
+# successfully since 2026-06-04 (AT-2128).
+#
+# This wrapper's original justification -- "GitHub Free blocks that direct
+# call" -- was a misdiagnosis. The early direct-call failures actually
+# traced to ignite-pilot-org's org-wide default_workflow_permissions=read
+# (a called workflow can't exceed the permissions its caller was granted;
+# ignite-corp defaults to write); a fix commit that added the missing
+# `permissions:` block in the same diff as a switch to the wrapper made the
+# wrapper look load-bearing when it wasn't (AT-1982).
+#
+# It stays anyway, on grounds that don't depend on the above: 17 pilot repos
+# already depend on it via `wrapper.yml@v1`, migrating them off has real
+# cost, and it has a validated multi-month success record in this org,
+# versus the direct-call path's first confirmed 3-reviewer success only as
+# of 2026-09-01 (AT-1982 decision, comment 85005). Retention rationale, not
+# technical necessity.
 #
 # Versioning: this repo's release MAJOR.MINOR tracks ignite-corp/ai-dev-pr-review
 # in lockstep; PATCH moves independently per repo. Current pairing: wrapper
@@ -132,8 +154,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
 
       # --- Upstream checkout (helper scripts + trusted prompt) ---
-      # ignite-corp/ai-dev-pr-review is a PUBLIC repo, so the cross-org
-      # actions/checkout is allowed on Free plan.
+      # ignite-corp/ai-dev-pr-review is a PUBLIC repo, so this cross-org
+      # actions/checkout works regardless of org plan or caller visibility
+      # (not a Free-plan-specific allowance -- see the header comment).
       - name: Checkout ai-dev-pr-review scripts
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
