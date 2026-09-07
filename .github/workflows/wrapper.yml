@@ -159,10 +159,30 @@ jobs:
     #     the runner, so no expression can read it.
     # Restoring the verdict therefore cannot be conditioned on the cause. The
     # discriminator that does work is slot ownership rather than cause --
-    # aggregate_reviews.py's `_head_is_stale()`, which base already relies on --
-    # but wiring it here means also reverting this file's `!cancelled()` to
-    # `always()`, so it is a change to AT-2092's mechanism and is tracked
-    # separately rather than smuggled in here.
+    # aggregate_reviews.py's `_head_is_stale()`, which base already relies on.
+    # Since AT-2117 the aggregate step passes HEAD_SHA, so that guard is live
+    # on this path too, and the step's `!cancelled()` gate is deliberately
+    # kept alongside it (AT-2117, option C). The two alternatives were
+    # rejected:
+    #   * A -- pass HEAD_SHA and revert `!cancelled()` to `always()`. That
+    #     brings the aggregate step back into cancelled runs, and the
+    #     aggregate step is the sole consumer of the three steps AT-2102
+    #     narrowed to `!cancelled()` (Mint reviewer App token, Synthesize
+    #     missing reviewer verdicts, Compute reviewer result statuses), so
+    #     reverting reopens AT-2102's basis -- the unreclaimed App token
+    #     first among them.
+    #   * B -- keep `!cancelled()` and keep not passing HEAD_SHA. That leaves
+    #     `_head_is_stale()` dead code on this path, and keeps missing the
+    #     case base catches: a run that was not cancelled but whose head
+    #     moved while it was still finishing.
+    # With both layers, `!cancelled()` skips the step in a cancelled run and
+    # `_head_is_stale()` catches the uncancelled-but-superseded run. They are
+    # distinguishable in the logs: for the former the step shows as skipped
+    # (cancel landed before it started) or cancelled (cancel landed while it
+    # was running); the latter runs to completion, emits a
+    # `::notice title=Aggregate::` line saying the head was superseded, and
+    # exits 1 without posting. That notice is the unambiguous discriminator
+    # either way -- only the guard emits it.
     timeout-minutes: 180
     steps:
       # --- Caller checkout (PR head) ---
@@ -1281,6 +1301,10 @@ jobs:
           REVIEWER_TOKEN: ${{ steps.reviewer_token.outputs.token }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          # The head this run reviewed, for `_head_is_stale()` (AT-2117; see
+          # the job comment above). Empty on the size-skip path, where
+          # steps.refs never ran -- the guard treats that as not stale.
+          HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
           SIZE_SKIPPED: ${{ steps.size-check.outputs.skip }}
           SIZE_TOTAL: ${{ steps.size-check.outputs.total }}
           SIZE_LIMIT: ${{ steps.size-check.outputs.limit }}
