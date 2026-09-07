@@ -312,6 +312,9 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.head_ref }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
@@ -321,14 +324,27 @@ jobs:
             HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha // ""')
             HEAD_REF=$(echo "$PR_JSON" | jq -r '.head.ref // ""')
             PR_AUTHOR=$(echo "$PR_JSON" | jq -r '.user.login // ""')
+            PR_MERGED=$(echo "$PR_JSON" | jq -r '.merged // false')
+            MERGE_COMMIT_SHA=$(echo "$PR_JSON" | jq -r '.merge_commit_sha // ""')
+            PR_COMMITS=$(echo "$PR_JSON" | jq -r '.commits // ""')
           else
             HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          fi
+          # On an open PR merge_commit_sha names GitHub's test-merge commit,
+          # not anything that landed; the diff step must only ever see the
+          # real merge commit of a merged PR (AT-2201).
+          if [ "$PR_MERGED" != "true" ]; then
+            PR_MERGED="false"
+            MERGE_COMMIT_SHA=""
           fi
           {
             echo "base_ref=${BASE_REF}"
             echo "head_sha=${HEAD_SHA}"
             echo "head_ref=${HEAD_REF}"
             echo "pr_author=${PR_AUTHOR}"
+            echo "pr_merged=${PR_MERGED}"
+            echo "merge_commit_sha=${MERGE_COMMIT_SHA}"
+            echo "pr_commits=${PR_COMMITS}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Fetch PR head (when pr_number provided manually)
@@ -375,18 +391,49 @@ jobs:
             exit 1
           fi
 
+      # The diff itself is delegated to extract_pr_diff.sh: an open PR keeps
+      # the `git diff origin/BASE...HEAD` it always had, a merged PR (a
+      # dispatched re-review after the merge) is diffed from its merge commit
+      # because the three-dot form is empty once the base contains the head,
+      # and an empty diff fails the step rather than reviewing nothing (AT-2201).
       - name: Extract diff and context
         if: steps.size-check.outputs.skip == 'false'
         timeout-minutes: 5
         env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           BASE_REF: ${{ steps.refs.outputs.base_ref }}
           HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
           PR_AUTHOR: ${{ steps.refs.outputs.pr_author }}
           HEAD_REF: ${{ steps.refs.outputs.head_ref }}
+          PR_MERGED: ${{ steps.refs.outputs.pr_merged }}
+          MERGE_COMMIT_SHA: ${{ steps.refs.outputs.merge_commit_sha }}
+          PR_COMMITS: ${{ steps.refs.outputs.pr_commits }}
           SYSTEM_PROMPT_PATH: ${{ inputs.code-review-system-prompt-path }}
           CHECKLIST_PATH: ${{ inputs.code-review-checklist-path }}
         run: |
-          git diff "origin/${BASE_REF}...${HEAD_SHA}" > pr.diff
+          # This wrapper's YAML is released on its own cadence while the
+          # scripts come from `upstream_ref` (the `v1` float by default), so
+          # an upstream_ref that predates the script -- any base release
+          # older than v1.8.1 -- would fail here and review nothing. Same
+          # guard as base's step (base-ai-review-prepare.yml, AT-2201). A
+          # consumer floating on `v1` leaves the fallback branch once base
+          # v1.8.1 is published. The fallback keeps the one guarantee that
+          # needs no script: an empty diff fails the step, so a merged PR
+          # under an old upstream_ref fails loudly instead of being approved
+          # unread.
+          SCRIPT=".ai-dev-pr-review/.github/scripts/extract_pr_diff.sh"
+          if [ -f "$SCRIPT" ]; then
+            bash "$SCRIPT"
+          else
+            echo "::warning::extract_pr_diff.sh not in pinned checkout; merged-PR diff reconstruction unavailable (AT-2201)"
+            git diff "origin/${BASE_REF}...${HEAD_SHA}" > pr.diff
+            if [ ! -s pr.diff ]; then
+              echo "::error title=Empty diff::pr.diff is empty after 'git diff origin/${BASE_REF}...${HEAD_SHA}' (PR #${PR_NUMBER}, merged=${PR_MERGED}); nothing to review, refusing to report success"
+              exit 1
+            fi
+          fi
           git fetch --depth=1 origin "$BASE_REF"
           if git show "origin/${BASE_REF}:${SYSTEM_PROMPT_PATH}" > context.md 2>/dev/null; then
             :
