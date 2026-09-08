@@ -484,10 +484,90 @@ jobs:
             echo ""
           } > context.md.tmp && cat context.md >> context.md.tmp && mv context.md.tmp context.md
 
-      # Not gated on the size check: the aggregate step below runs on the
-      # size-skip path too and needs the pinned interpreter there. The pip
-      # install that follows stays gated -- aggregate_reviews.py is stdlib-only,
-      # only the reviewers need the requirements.
+      # Policy exclusion (AT-2206), inlined from base-ai-review-prepare.yml.
+      # The consumer's `.github/lens-ignore`, read from the PR head the tree
+      # is on, names files whose hunks are removed from pr.diff before any
+      # reviewer step below reads it; the paths are appended to context.md
+      # and published as outputs so the exclusion is never silent. The
+      # script is stdlib-only, so it runs on the runner's system python3
+      # here, ahead of the setup-python step below, as in base. The run body
+      # is base's, byte for byte; only this comment is the wrapper's.
+      #
+      # When every changed file is excluded there is nothing to review. This
+      # step comments why -- led by the same two marker lines as the
+      # aggregate's skip verdict, so the stale-item pass folds the note on
+      # the next run and a consumer gate keyed on the latest LENS comment
+      # never sees a marker-less one -- and every reviewer-phase step below
+      # is additionally gated on its policy_skipped output, the way base
+      # gates its reviewer jobs on prepare's combined `skip`. The aggregate
+      # step is not gated: it runs on this path with POLICY_SKIPPED set,
+      # posts the verdict listing the paths and exits 0, so this single job
+      # -- the required check -- concludes `success`. That is the decision on
+      # both paths (base: format_policy_skip_summary in aggregate_reviews.py),
+      # not the AT-1975 inversion the size skip once had here: the consumer's
+      # own rule says the content is not review material, and a red check
+      # would block merge on a repository with no ruleset to override it.
+      #
+      # Same guard shape as the extract step above, opposite fallback. The
+      # script arrives with the `upstream_ref` checkout at .ai-dev-pr-review/
+      # (the `v1` float by default), not a pin of this file's own, so an
+      # upstream_ref older than the base release that ships it cannot filter.
+      # When the consumer carries a rule file the step then fails rather than
+      # hand the reviewers a diff the policy says they must not see -- the
+      # pin the error message tells the consumer to move is upstream_ref.
+      # Without a rule file there is nothing to filter and the step only
+      # reports so. A failure here surfaces like an extract failure (AT-2201):
+      # the success()-gated reviewer steps are skipped, the always() ones run,
+      # and the aggregate posts the all-failed verdict and exits 1.
+      - name: Filter policy-excluded files
+        id: policy
+        if: steps.size-check.outputs.skip == 'false'
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          SCRIPT=".ai-dev-pr-review/.github/scripts/filter_pr_diff.py"
+          RULES=".github/lens-ignore"
+          if [ ! -f "$SCRIPT" ]; then
+            if [ -f "$RULES" ]; then
+              echo "::error title=Pinned checkout predates lens-ignore::${RULES} exists but filter_pr_diff.py is not in the pinned ai-dev-pr-review checkout; refusing to review an unfiltered diff. Pin ai-dev-pr-review to a release that ships the script (AT-2206)"
+              exit 1
+            fi
+            echo "::warning::filter_pr_diff.py not in pinned checkout; no ${RULES} in this repository, nothing to filter (AT-2206)"
+            {
+              echo "policy_skipped=false"
+              echo "excluded_count=0"
+              echo "excluded_paths="
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 "$SCRIPT"
+          RESULT=".review-context/lens-ignore.json"
+          if [ "$(jq -r '.policy_skipped' "$RESULT")" = "true" ]; then
+            COUNT=$(jq -r '.excluded_count' "$RESULT")
+            # The note leads with the same two markers as the aggregate's
+            # skip verdict. The review marker lets the aggregate's stale-item
+            # pass fold the note on the next run, so an all-excluded PR
+            # pushed repeatedly does not stack one note per run; the skip
+            # marker keeps a consumer gate keyed on the latest LENS comment
+            # from ever seeing a marker-less "latest" in the seconds between
+            # this note and the aggregate verdict.
+            BODY=$(printf '%s\n' \
+              "<!-- multi-llm-review -->" \
+              "<!-- lens:skipped reason=policy-excluded-only files=${COUNT} -->" \
+              "[i] Only policy-excluded files changed (${COUNT} file(s) matched ${RULES}). Skipping AI review -- the aggregate verdict below lists the paths.")
+            gh pr comment "$PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body "$BODY"
+          fi
+
+      # Not gated on the size check or the policy skip: the aggregate step
+      # below runs on both skip paths and needs the pinned interpreter there
+      # (base gates its setup-python on both, its aggregate being a separate
+      # job). The pip install that follows stays gated -- aggregate_reviews.py
+      # is stdlib-only, only the reviewers need the requirements.
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         if: always()
         timeout-minutes: 3
@@ -495,12 +575,12 @@ jobs:
           python-version-file: ".ai-dev-pr-review/.github/scripts/.python-version"
 
       - name: Install upstream Python deps
-        if: steps.size-check.outputs.skip == 'false'
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true'
         timeout-minutes: 5
         run: pip install -r .ai-dev-pr-review/.github/scripts/requirements.txt
 
       - name: Append prior review context
-        if: steps.size-check.outputs.skip == 'false'
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true'
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
@@ -509,14 +589,14 @@ jobs:
         run: python3 .ai-dev-pr-review/.github/scripts/fetch_review_context.py
 
       - name: Append verified action SHA pins
-        if: steps.size-check.outputs.skip == 'false'
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true'
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 .ai-dev-pr-review/.github/scripts/verify_action_shas.py
 
       - name: Collect unresolved review threads
-        if: steps.size-check.outputs.skip == 'false'
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true'
         continue-on-error: true
         timeout-minutes: 5
         env:
@@ -527,7 +607,7 @@ jobs:
 
       - name: Load unresolved review threads
         id: load-threads
-        if: steps.size-check.outputs.skip == 'false'
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true'
         timeout-minutes: 2
         run: |
           THREADS_FILE=".review-context/unresolved-threads.json"
@@ -551,7 +631,7 @@ jobs:
       # ====================== CLAUDE REVIEWER ======================
 
       - name: Build Claude prompt with existing threads
-        if: steps.size-check.outputs.skip == 'false'
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true'
         timeout-minutes: 3
         env:
           THREAD_COUNT: ${{ steps.load-threads.outputs.thread_count }}
@@ -634,7 +714,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Run Claude review
-        if: steps.size-check.outputs.skip == 'false'
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true'
         id: claude-review
         continue-on-error: true
         timeout-minutes: 10
@@ -652,7 +732,7 @@ jobs:
           prompt: ${{ env.CLAUDE_PROMPT }}
 
       - name: Extract Claude review from execution log (fallback)
-        if: steps.size-check.outputs.skip == 'false' && always()
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && always()
         continue-on-error: true
         timeout-minutes: 3
         env:
@@ -683,7 +763,7 @@ jobs:
       # an infrastructure failure, never a benign skip. Not continue-on-error:
       # if we cannot even record the failure, the job must not report success.
       - name: Emit Claude error verdict (no verdict file)
-        if: steps.size-check.outputs.skip == 'false' && always()
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && always()
         timeout-minutes: 2
         env:
           EXEC_FILE: ${{ steps.claude-review.outputs.execution_file }}
@@ -713,7 +793,7 @@ jobs:
           jq empty review-claude.json
 
       - name: Post Claude inline comments
-        if: ${{ steps.size-check.outputs.skip == 'false' && !cancelled() }}
+        if: ${{ steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && !cancelled() }}
         continue-on-error: true
         timeout-minutes: 5
         env:
@@ -736,7 +816,7 @@ jobs:
 
       - name: Read Claude early_exit
         id: claude-exit
-        if: steps.size-check.outputs.skip == 'false' && always()
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && always()
         timeout-minutes: 2
         run: |
           if [ -f review-claude.json ]; then
@@ -759,7 +839,7 @@ jobs:
       # outcome is the discriminator: the codex steps below gate on it, so
       # codex is skipped for a codex-shaped reason and nothing else is.
       - name: Install Codex CLI
-        if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true'
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && steps.claude-exit.outputs.early_exit != 'true'
         continue-on-error: true
         # Pinned: unpinned installs pulled releases that dropped `codex exec
         # --full-auto`, breaking every codex review. Bump deliberately after
@@ -771,7 +851,7 @@ jobs:
       # its outcome is the single gate for the rest of the codex reviewer.
       - name: Authenticate Codex CLI with API key
         id: codex-auth
-        if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true'
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && steps.claude-exit.outputs.early_exit != 'true'
         continue-on-error: true
         timeout-minutes: 2
         env:
@@ -792,6 +872,7 @@ jobs:
         id: sysctl
         if: >-
           steps.size-check.outputs.skip == 'false' &&
+          steps.policy.outputs.policy_skipped != 'true' &&
           steps.claude-exit.outputs.early_exit != 'true' &&
           steps.codex-auth.outcome == 'success'
         timeout-minutes: 2
@@ -810,6 +891,7 @@ jobs:
       - name: Use trusted Codex prompt from ai-dev-pr-review
         if: >-
           steps.size-check.outputs.skip == 'false' &&
+          steps.policy.outputs.policy_skipped != 'true' &&
           steps.claude-exit.outputs.early_exit != 'true' &&
           steps.codex-auth.outcome == 'success'
         timeout-minutes: 2
@@ -818,6 +900,7 @@ jobs:
       - name: Run Codex review
         if: >-
           steps.size-check.outputs.skip == 'false' &&
+          steps.policy.outputs.policy_skipped != 'true' &&
           steps.claude-exit.outputs.early_exit != 'true' &&
           steps.codex-auth.outcome == 'success'
         id: codex_run
@@ -947,7 +1030,7 @@ jobs:
           fi
 
       - name: Upload Codex logs
-        if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true' && always()
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && steps.claude-exit.outputs.early_exit != 'true' && always()
         continue-on-error: true
         timeout-minutes: 5
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -961,7 +1044,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Restore sysctl after Codex
-        if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true' && always()
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && steps.claude-exit.outputs.early_exit != 'true' && always()
         timeout-minutes: 2
         env:
           ORIG_USERNS: ${{ steps.sysctl.outputs.orig_userns }}
@@ -975,7 +1058,7 @@ jobs:
           fi
 
       - name: Normalize Codex review file name
-        if: steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true' && always()
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && steps.claude-exit.outputs.early_exit != 'true' && always()
         timeout-minutes: 2
         run: |
           EXPECTED="review-codex.json"
@@ -994,7 +1077,7 @@ jobs:
           fi
 
       - name: Post Codex inline comments
-        if: ${{ steps.size-check.outputs.skip == 'false' && steps.claude-exit.outputs.early_exit != 'true' && !cancelled() }}
+        if: ${{ steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && steps.claude-exit.outputs.early_exit != 'true' && !cancelled() }}
         continue-on-error: true
         timeout-minutes: 5
         env:
@@ -1017,7 +1100,7 @@ jobs:
 
       - name: Read Codex early_exit
         id: codex-exit
-        if: steps.size-check.outputs.skip == 'false' && always()
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && always()
         timeout-minutes: 2
         run: |
           if [ -f review-codex.json ]; then
@@ -1044,6 +1127,7 @@ jobs:
         if: >-
           ${{ !cancelled() &&
           steps.size-check.outputs.skip == 'false' &&
+          steps.policy.outputs.policy_skipped != 'true' &&
           steps.claude-exit.outputs.early_exit != 'true' &&
           steps.codex-exit.outputs.early_exit != 'true' }}
         continue-on-error: true
@@ -1058,6 +1142,7 @@ jobs:
       - name: Post Gemini inline comments
         if: >-
           ${{ steps.size-check.outputs.skip == 'false' &&
+          steps.policy.outputs.policy_skipped != 'true' &&
           steps.claude-exit.outputs.early_exit != 'true' &&
           steps.codex-exit.outputs.early_exit != 'true' &&
           !cancelled() }}
@@ -1141,7 +1226,7 @@ jobs:
       # step timeout), so the synthesized failure verdict this step exists for
       # is produced exactly as before.
       - name: Synthesize missing reviewer verdicts
-        if: ${{ steps.size-check.outputs.skip == 'false' && !cancelled() }}
+        if: ${{ steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && !cancelled() }}
         timeout-minutes: 3
         env:
           CODEX_AUTH_OUTCOME: ${{ steps.codex-auth.outcome }}
@@ -1229,7 +1314,7 @@ jobs:
       # by the aggregate step's env, which is itself `!cancelled()`.
       - name: Compute reviewer result statuses
         id: results
-        if: ${{ steps.size-check.outputs.skip == 'false' && !cancelled() }}
+        if: ${{ steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && !cancelled() }}
         timeout-minutes: 2
         run: |
           set -euo pipefail
@@ -1292,7 +1377,7 @@ jobs:
       # is `failure`, not `cancelled`, and still mints the token as before.
       - name: Mint reviewer App token
         id: reviewer_token
-        if: ${{ steps.size-check.outputs.skip == 'false' && !cancelled() && vars.REVIEWER_APP_ID != '' }}
+        if: ${{ steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && !cancelled() && vars.REVIEWER_APP_ID != '' }}
         timeout-minutes: 3
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
         continue-on-error: true
@@ -1313,6 +1398,15 @@ jobs:
       # never read. It posts a request_changes verdict naming the measurement
       # and both remedies, then exits 1 -- which fails this job, so the check
       # goes red instead of green.
+      #
+      # POLICY_SKIPPED is the other short-circuit (AT-2206), read after
+      # SIZE_SKIPPED and before any REVIEWER_RESULT_* value, so the reviewer
+      # steps the policy gate skipped are never looked for. On that path the
+      # script posts the skip verdict listing the excluded paths and exits 0,
+      # so this job -- the required check -- concludes `success`; that is the
+      # intended outcome (see the policy step's comment), not the AT-1975
+      # inversion the size skip had. EXCLUDED_COUNT / EXCLUDED_PATHS also
+      # annotate a normal verdict when only some files were excluded.
       #
       # steps.size-check.outcome is the wrapper's analog of base's
       # `needs.prepare.result == 'success'`: when the size check itself failed,
@@ -1352,9 +1446,16 @@ jobs:
           # the job comment above). Empty on the size-skip path, where
           # steps.refs never ran -- the guard treats that as not stale.
           HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
+          # Already the pure size flag here -- the policy step carries its own
+          # output -- so a policy skip cannot render as a PR-too-large
+          # failure (base passes size_skipped, not its combined skip, for
+          # the same reason).
           SIZE_SKIPPED: ${{ steps.size-check.outputs.skip }}
           SIZE_TOTAL: ${{ steps.size-check.outputs.total }}
           SIZE_LIMIT: ${{ steps.size-check.outputs.limit }}
+          POLICY_SKIPPED: ${{ steps.policy.outputs.policy_skipped }}
+          EXCLUDED_COUNT: ${{ steps.policy.outputs.excluded_count }}
+          EXCLUDED_PATHS: ${{ steps.policy.outputs.excluded_paths }}
           BOT_LOGIN: ${{ vars.BOT_LOGIN || 'github-actions[bot]' }}
           CRITICAL_THRESHOLD: ${{ vars.CRITICAL_THRESHOLD || '1' }}
           DEPENDABOT_CRITICAL_THRESHOLD: ${{ vars.DEPENDABOT_CRITICAL_THRESHOLD || '2' }}
