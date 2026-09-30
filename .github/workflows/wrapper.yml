@@ -857,6 +857,19 @@ jobs:
           # 'false' -> OAuth path unchanged (AT-1606 feature-off invariant).
           # Pilot org has no org vars; this reads a per-repo var if ever set.
           force_api: ${{ vars.CLAUDE_FORCE_API == 'true' }}
+          # Same pattern: a consumer can override the bot allow-list (AT-2272)
+          # without a base release by setting this var. It REPLACES the list
+          # wholesale -- GitHub Actions has no way to merge it with a default
+          # inside this expression -- so a consumer that wants to add one bot
+          # must set the complete list, not just the addition. Unset resolves
+          # to the literal below, a deliberate duplicate of the composite's
+          # own default (action.yml's allowed_bots input); base guards its
+          # own copy of that pair with
+          # test_single_yml_fallback_matches_composite_default in
+          # test_claude_review_allowed_bots.py, which does not read this
+          # file -- so this third copy drifts silently and is checked by
+          # hand at each lockstep port.
+          allowed_bots: ${{ vars.CLAUDE_ALLOWED_BOTS || 'dependabot[bot],pilot-cd-dispatcher[bot],github-actions[bot],ignite-actions-token-app[bot]' }}
           prompt: ${{ env.CLAUDE_PROMPT }}
 
       - name: Extract Claude review from execution log (fallback)
