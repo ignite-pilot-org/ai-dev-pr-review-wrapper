@@ -72,6 +72,25 @@ on:
         required: false
       REVIEWER_APP_PRIVATE_KEY:
         required: false
+    # A merge gate sees only this workflow's conclusion, and that is green
+    # whether every reviewer produced a verdict or one of three did. The
+    # roster carries that fact out in a form a gate can read; it changes no
+    # conclusion and no exit status (AT-2511).
+    #
+    # Base declares these on both base-ai-review-aggregate.yml and the
+    # orchestrator that re-exports them, because the roster has two hops to
+    # travel there. The wrapper is one job in one workflow, so this is the
+    # only declaration -- and it is the one a pilot consumer calls.
+    outputs:
+      reviewer_roster:
+        description: "JSON {expected, responded, missing{name: reason}} for this round; see ignite-corp/ai-dev-pr-review README 'Output contract reference' for which missing reasons are benign"
+        value: ${{ jobs.review.outputs.reviewer_roster }}
+      reviewers_expected_count:
+        description: "How many reviewers were configured for this round"
+        value: ${{ jobs.review.outputs.reviewers_expected_count }}
+      reviewers_responded_count:
+        description: "How many of them produced a usable verdict. A benign round can report fewer than expected, so a gate must read reviewer_roster.missing rather than compare the counts alone"
+        value: ${{ jobs.review.outputs.reviewers_responded_count }}
 
 permissions:
   contents: read
@@ -85,6 +104,15 @@ jobs:
   review:
     name: AI Review (sequential)
     runs-on: ubuntu-latest
+    # Lifted from the aggregate step's own outputs (AT-2511). Empty strings
+    # when that step did not run -- it is gated `!cancelled() &&
+    # steps.size-check.outcome == 'success'` -- which is the same shape a
+    # caller sees on base when the aggregate job is skipped.
+    outputs:
+      reviewer_roster: ${{ steps.aggregate.outputs.reviewer_roster }}
+      reviewers_expected_count: ${{ steps.aggregate.outputs.reviewers_expected_count }}
+      reviewers_responded_count: ${{ steps.aggregate.outputs.reviewers_responded_count }}
+
     # AT-2103: this ceiling is now an outer backstop, not the enforcement
     # mechanism. Before this fix it *was* the mechanism -- the only timeout on
     # the job -- and hitting it cancelled the whole job server-side (the
@@ -1535,6 +1563,7 @@ jobs:
       # excluded. The `${{ }}` wrapper is required -- a bare leading `!` is a
       # YAML tag indicator, not an expression.
       - name: Aggregate and post verdict
+        id: aggregate
         if: ${{ !cancelled() && steps.size-check.outcome == 'success' }}
         timeout-minutes: 10
         env:
