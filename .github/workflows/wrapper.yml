@@ -33,7 +33,7 @@ name: AI Review Wrapper
 #
 # Versioning: this repo's release MAJOR.MINOR tracks ignite-corp/ai-dev-pr-review
 # in lockstep; PATCH moves independently per repo. Current pairing: wrapper
-# v1.10.0 <-> base v1.10.0. When either repo needs a
+# v1.11.2 <-> base v1.11.2. When either repo needs a
 # MINOR (or MAJOR) bump, the other cuts a matching alignment release --
 # content-identical if it has no changes. Both repos auto-float their v1 major
 # tag via move-major-tag.yml on release publish, so @v1 consumers need no action.
@@ -72,6 +72,25 @@ on:
         required: false
       REVIEWER_APP_PRIVATE_KEY:
         required: false
+    # A merge gate sees only this workflow's conclusion, and that is green
+    # whether every reviewer produced a verdict or one of three did. The
+    # roster carries that fact out in a form a gate can read; it changes no
+    # conclusion and no exit status (AT-2511).
+    #
+    # Base declares these on both base-ai-review-aggregate.yml and the
+    # orchestrator that re-exports them, because the roster has two hops to
+    # travel there. The wrapper is one job in one workflow, so this is the
+    # only declaration -- and it is the one a pilot consumer calls.
+    outputs:
+      reviewer_roster:
+        description: "JSON {expected, responded, missing{name: reason}} for this round; see ignite-corp/ai-dev-pr-review README 'Output contract reference' for which missing reasons are benign"
+        value: ${{ jobs.review.outputs.reviewer_roster }}
+      reviewers_expected_count:
+        description: "How many reviewers were configured for this round"
+        value: ${{ jobs.review.outputs.reviewers_expected_count }}
+      reviewers_responded_count:
+        description: "How many of them produced a usable verdict. A benign round can report fewer than expected, so a gate must read reviewer_roster.missing rather than compare the counts alone"
+        value: ${{ jobs.review.outputs.reviewers_responded_count }}
 
 permissions:
   contents: read
@@ -85,6 +104,15 @@ jobs:
   review:
     name: AI Review (sequential)
     runs-on: ubuntu-latest
+    # Lifted from the aggregate step's own outputs (AT-2511). Empty strings
+    # when that step did not run -- it is gated `!cancelled() &&
+    # steps.size-check.outcome == 'success'` -- which is the same shape a
+    # caller sees on base when the aggregate job is skipped.
+    outputs:
+      reviewer_roster: ${{ steps.aggregate.outputs.reviewer_roster }}
+      reviewers_expected_count: ${{ steps.aggregate.outputs.reviewers_expected_count }}
+      reviewers_responded_count: ${{ steps.aggregate.outputs.reviewers_responded_count }}
+
     # AT-2103: this ceiling is now an outer backstop, not the enforcement
     # mechanism. Before this fix it *was* the mechanism -- the only timeout on
     # the job -- and hitting it cancelled the whole job server-side (the
@@ -228,7 +256,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: ignite-pilot-org/ai-dev-pr-review-wrapper
-          ref: v1.10.0
+          ref: v1.11.2
           path: .wrapper-defaults
           sparse-checkout: .prompts
           sparse-checkout-cone-mode: false
@@ -829,6 +857,19 @@ jobs:
           # 'false' -> OAuth path unchanged (AT-1606 feature-off invariant).
           # Pilot org has no org vars; this reads a per-repo var if ever set.
           force_api: ${{ vars.CLAUDE_FORCE_API == 'true' }}
+          # Same pattern: a consumer can override the bot allow-list (AT-2272)
+          # without a base release by setting this var. It REPLACES the list
+          # wholesale -- GitHub Actions has no way to merge it with a default
+          # inside this expression -- so a consumer that wants to add one bot
+          # must set the complete list, not just the addition. Unset resolves
+          # to the literal below, a deliberate duplicate of the composite's
+          # own default (action.yml's allowed_bots input); base guards its
+          # own copy of that pair with
+          # test_single_yml_fallback_matches_composite_default in
+          # test_claude_review_allowed_bots.py, which does not read this
+          # file -- so this third copy drifts silently and is checked by
+          # hand at each lockstep port.
+          allowed_bots: ${{ vars.CLAUDE_ALLOWED_BOTS || 'dependabot[bot],pilot-cd-dispatcher[bot],github-actions[bot],ignite-actions-token-app[bot]' }}
           prompt: ${{ env.CLAUDE_PROMPT }}
 
       - name: Extract Claude review from execution log (fallback)
@@ -1055,6 +1096,73 @@ jobs:
             } >> "$COMBINED"
           fi
           cat "${RUNNER_TEMP}/review_prompt.md" >> "$COMBINED"
+          # Only a verdict file THIS run produced may stand as the verdict
+          # (AT-2424). The consumer repo is checked out at the workspace
+          # root, so review-codex.json and the legacy names alike are paths
+          # the PR under review can commit; left in place they are taken for
+          # this run's answer, which lets a PR ship its own approving
+          # verdict. Clearing all three immediately before the CLI makes
+          # existence itself the proof of provenance; the script says why no
+          # timestamp test can stand in for that under workspace-write.
+          #
+          # The three names are the script's own fixed list -- the target
+          # plus verdict-openai.json and verdict-codex.json -- and nothing
+          # wider. This job runs claude, codex and gemini in ONE tree, so a
+          # glob here would take out review-claude.json, which the steps
+          # above have already written and nothing would write again.
+          #
+          # Guarded on the script being in the pinned checkout, the same way
+          # 'Extract diff and context' guards extract_pr_diff.sh: this
+          # wrapper's YAML is released on its own cadence while the scripts
+          # come from `upstream_ref` (the `v1` float by default), so an
+          # upstream_ref older than base v1.11.2 reaches this branch. A
+          # consumer floating on `v1` leaves it as soon as base v1.11.2 is
+          # published.
+          #
+          # It FAILS CLOSED by skipping the review, not by running it
+          # without the clear. Skipping costs a consumer on an old
+          # upstream_ref its Codex reviewer until it floats forward;
+          # proceeding would cost the verdict its meaning, because the
+          # direct-write branch below needs no script and would read a
+          # review-codex.json the PR committed as this run's result.
+          PROMOTE=".ai-dev-pr-review/.github/scripts/promote_legacy_verdict.sh"
+          if [ ! -f "$PROMOTE" ]; then
+            echo "::error::promote_legacy_verdict.sh is not in the pinned" \
+              "checkout; skipping the Codex review, because the provenance" \
+              "clear it performs is what stops a verdict file committed by" \
+              "the PR from being read as this run's verdict (AT-2424)"
+            # The verdict says the reviewer could not run: status failed is
+            # the infrastructure class, never a model-emitted value
+            # (AT-1799), so the aggregate reports a missing reviewer rather
+            # than an approving one. rm -rf first because that path is one
+            # the PR can have committed as a directory, which would fail
+            # the redirect and take the step down.
+            rm -rf review-codex.json
+            jq -n '{
+              summary: ("Codex review skipped: promote_legacy_verdict.sh is not"
+                        + " in the pinned checkout, so verdict files committed"
+                        + " by the PR cannot be cleared"),
+              status: "failed",
+              early_exit: false,
+              issues: [],
+              error: "provenance_unavailable",
+              error_detail: "promote_legacy_verdict.sh missing from the pinned checkout"
+            }' > review-codex.json
+            # Marked on this path too: what the net reads the marker for
+            # is "has this step taken responsibility for the verdict
+            # file", and writing the verdict above is one of the two ways
+            # it does. Without the mark here the net would read this
+            # branch as a step that never ran and clear the verdict it
+            # just wrote.
+            : > "${RUNNER_TEMP}/codex-start"
+            exit 0
+          fi
+          bash "$PROMOTE" clear review-codex.json
+          # The other way, and the question the net asks: this step has
+          # taken responsibility for review-codex.json -- here by clearing
+          # it, so anything found at that name afterwards was written by
+          # this run. Marked only after the clear actually happened.
+          : > "${RUNNER_TEMP}/codex-start"
           # `codex exec` 0.147.0 rejects `--full-auto` (removed upstream);
           # `--sandbox workspace-write` alone preserves the prior behavior.
           codex exec \
@@ -1073,20 +1181,34 @@ jobs:
             | tail -n 1 \
             | cut -c1-200 \
             || true)
+          # Promote a legacy-named verdict HERE, ahead of the fallbacks
+          # below (AT-2424). The base prompt may still instruct the model to
+          # write the older names, and every fallback path writes an error
+          # verdict to review-codex.json -- which then made the 'Normalize
+          # Codex review file name' step find the canonical file present and
+          # skip the promotion whole, so the verdict the model really wrote
+          # was discarded and the aggregate reported that Codex produced no
+          # verdict at all.
+          # A verdict the model wrote outranks one we synthesized for it.
+          # Unguarded: the branch above exits when the script is missing,
+          # so everything from here on can count on it.
+          bash "$PROMOTE" promote review-codex.json
           if [ -s review-codex.json ]; then
-            # Fail-closed: a direct write is only trusted if it parses as
-            # JSON. Malformed model output becomes an honest failed verdict
-            # instead of crashing downstream jq consumers.
-            if jq empty review-codex.json 2>/dev/null; then
+            # Fail-closed: a direct write is trusted only if the shared
+            # stamper can read it back as a verdict. That is the same
+            # filter and the same shape test a promoted legacy verdict
+            # gets -- the inline copy that used to live here had already
+            # drifted from it, back-filling no early_exit, so a direct
+            # write in the legacy schema reached the aggregate as nothing
+            # (AT-2424). It also no longer dies on a parseable non-object:
+            # `[]` made the inline jq error out, which under the runner's
+            # bash -e took the step down instead of producing a verdict.
+            # The temp file it stamps through is step-owned, in
+            # RUNNER_TEMP: the "review-codex.json.tmp" this replaced was a
+            # workspace path the PR could commit as a symlink or a
+            # directory.
+            if bash "$PROMOTE" stamp review-codex.json; then
               echo "::notice::Codex verdict file written directly"
-              # Direct writes skip the extract path, so mirror
-              # review_status.stamp_model_status here: keep a model-emitted
-              # ok/early_exit, otherwise re-derive from the early_exit flag
-              # ("failed" is reserved for infrastructure paths).
-              jq 'if (.status == "ok" or .status == "early_exit") then .
-                  else (.status = (if .early_exit == true then "early_exit" else "ok" end)) end' \
-                review-codex.json > review-codex.json.tmp \
-                && mv review-codex.json.tmp review-codex.json
             else
               echo "::warning::Codex wrote malformed verdict JSON -- replacing with error verdict"
               jq -n --arg detail "$LOG_TAIL" '{
@@ -1161,19 +1283,40 @@ jobs:
         if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && steps.claude-exit.outputs.early_exit != 'true' && always()
         timeout-minutes: 2
         run: |
-          EXPECTED="review-codex.json"
-          if [ ! -f "$EXPECTED" ]; then
-            for CANDIDATE in verdict-openai.json verdict-codex.json; do
-              if [ -f "$CANDIDATE" ]; then
-                if ! jq -e '.early_exit' "$CANDIDATE" > /dev/null 2>&1; then
-                  jq '. + {early_exit: false}' "$CANDIDATE" > "$EXPECTED"
-                else
-                  cp "$CANDIDATE" "$EXPECTED"
-                fi
-                echo "Normalized $CANDIDATE -> $EXPECTED"
-                break
-              fi
-            done
+          # The marker says the run step took responsibility for the
+          # verdict file: it cleared the name and ran the CLI, or it wrote
+          # an infrastructure verdict there itself. Either way what is at
+          # that name is this run's and the net leaves it alone, promoting
+          # a legacy name onto it only when the script is here to do it.
+          #
+          # No marker means the CLI never started -- an earlier step in
+          # this job failed -- so nothing on disk is ours, including a
+          # review-codex.json the PR committed, which the aggregate step's
+          # `[ ! -s review-codex.json ]` test would otherwise read as a
+          # verdict present. That path clears, and it clears WITHOUT the
+          # script too: the run step fails closed when the script is
+          # missing, and the net answering the same question the opposite
+          # way is how a PR-committed verdict survived on the one path
+          # where no infrastructure verdict exists to displace it either.
+          PROMOTE=".ai-dev-pr-review/.github/scripts/promote_legacy_verdict.sh"
+          if [ -f "${RUNNER_TEMP}/codex-start" ]; then
+            if [ -f "$PROMOTE" ]; then
+              # --target-is-ours: the run step already adjudicated that
+              # file, by stamping the CLI's write or by writing an
+              # infrastructure verdict of its own. Without the flag the
+              # promotion re-derives its status, which turned our own
+              # "failed" into "ok" and re-admitted a reviewer that never
+              # ran. The flag rather than a look at the payload, because
+              # a model can write any payload it likes (AT-1799).
+              bash "$PROMOTE" promote --target-is-ours review-codex.json
+            fi
+          elif [ -f "$PROMOTE" ]; then
+            bash "$PROMOTE" clear review-codex.json
+          else
+            # Only the canonical name, because that is the one this step
+            # owns and the only one any later step reads; the legacy names
+            # are inert without a promotion to carry them.
+            rm -rf review-codex.json
           fi
 
       - name: Post Codex inline comments
@@ -1535,6 +1678,7 @@ jobs:
       # excluded. The `${{ }}` wrapper is required -- a bare leading `!` is a
       # YAML tag indicator, not an expression.
       - name: Aggregate and post verdict
+        id: aggregate
         if: ${{ !cancelled() && steps.size-check.outcome == 'success' }}
         timeout-minutes: 10
         env:
