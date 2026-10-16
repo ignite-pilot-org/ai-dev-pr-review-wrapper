@@ -773,6 +773,7 @@ jobs:
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: python3 "${RUNNER_TEMP}/ai-dev-pr-review/.github/scripts/verify_action_shas.py"
 
       - name: Collect unresolved review threads
