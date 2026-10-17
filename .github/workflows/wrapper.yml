@@ -1157,6 +1157,49 @@ jobs:
         timeout-minutes: 2
         run: cp .ai-dev-pr-review/.github/scripts/review_prompt.md "${RUNNER_TEMP}/review_prompt.md"
 
+      # Base runs each reviewer in its own job, so `codex exec --sandbox
+      # workspace-write` there shares a workspace with no other reviewer's
+      # output. Here it runs in the CWD that already holds this run's
+      # review-claude.json, and a model steered by a prompt injection in the
+      # diff can overwrite it -- or pre-write review-gemini.json, which
+      # nothing removes once a codex early_exit skips the gemini steps. No
+      # later step would notice: the aggregate reads both from the CWD
+      # (AT-2614).
+      #
+      # So the verdicts this run already produced leave the workspace for
+      # the codex window, to a step-owned directory under RUNNER_TEMP: a
+      # path the PR cannot commit and outside the CWD, the sandbox's
+      # writable root. The sandbox also admits /tmp and $TMPDIR; RUNNER_TEMP
+      # is neither unless the runner points TMPDIR at it -- not measured
+      # here, and the codex-start marker already rests on the same
+      # assumption. pr.diff and context.md cannot
+      # leave -- the codex prompt tells it to read them -- so they are
+      # snapshotted instead, because 'Run Gemini review' and the inline
+      # comment steps read them after codex. Gated exactly as 'Run Codex
+      # review' is, so the stash exists whenever the CLI runs.
+      - name: Keep earlier verdicts out of the Codex workspace
+        if: >-
+          steps.size-check.outputs.skip == 'false' &&
+          steps.policy.outputs.policy_skipped != 'true' &&
+          steps.claude-exit.outputs.early_exit != 'true' &&
+          steps.codex-auth.outcome == 'success'
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          STASH="${RUNNER_TEMP}/verdicts-before-codex"
+          rm -rf -- "$STASH"
+          mkdir -p -- "$STASH/moved" "$STASH/copied"
+          for name in review-claude.json review-gemini.json; do
+            if [ -e "$name" ] || [ -L "$name" ]; then
+              mv -- "$name" "$STASH/moved/$name"
+            fi
+          done
+          for name in pr.diff context.md; do
+            if [ -f "$name" ] && [ ! -L "$name" ]; then
+              cp -p -- "$name" "$STASH/copied/$name"
+            fi
+          done
+
       - name: Run Codex review
         if: >-
           steps.size-check.outputs.skip == 'false' &&
@@ -1256,7 +1299,7 @@ jobs:
             # than an approving one. rm -rf first because that path is one
             # the PR can have committed as a directory, which would fail
             # the redirect and take the step down.
-            rm -rf review-codex.json
+            rm -rf -- review-codex.json
             jq -n '{
               summary: ("Codex review skipped: promote_legacy_verdict.sh is not"
                         + " in the pinned checkout, so verdict files committed"
@@ -1369,6 +1412,42 @@ jobs:
               error_detail: $detail
             }' > review-codex.json
           fi
+
+      # The other half of 'Keep earlier verdicts out of the Codex
+      # workspace'. always(), because 'Run Codex review' is continue-on-error
+      # and a dead or timed-out CLI has had the same write access as a live
+      # one. Anything now at review-claude.json or review-gemini.json was
+      # written during the codex window, so it is removed whatever it is --
+      # file, directory or symlink -- before this run's own files come back.
+      # No stash means the stash step did not run, so neither did the CLI.
+      - name: Restore earlier verdicts after Codex
+        if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && steps.claude-exit.outputs.early_exit != 'true' && always()
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          STASH="${RUNNER_TEMP}/verdicts-before-codex"
+          if [ ! -d "$STASH" ]; then
+            exit 0
+          fi
+          for name in review-claude.json review-gemini.json; do
+            if [ -e "$name" ] || [ -L "$name" ]; then
+              echo "::warning::Removed $name, written while Codex had the workspace"
+              rm -rf -- "$name"
+            fi
+            if [ -e "$STASH/moved/$name" ] || [ -L "$STASH/moved/$name" ]; then
+              mv -- "$STASH/moved/$name" "$name"
+            fi
+          done
+          for name in pr.diff context.md; do
+            if [ -f "$STASH/copied/$name" ]; then
+              if ! cmp -s -- "$STASH/copied/$name" "$name"; then
+                echo "::warning::Restored $name, changed while Codex had the workspace"
+              fi
+              rm -rf -- "$name"
+              mv -- "$STASH/copied/$name" "$name"
+            fi
+          done
+          rm -rf -- "$STASH"
 
       - name: Upload Codex logs
         if: steps.size-check.outputs.skip == 'false' && steps.policy.outputs.policy_skipped != 'true' && steps.claude-exit.outputs.early_exit != 'true' && always()
