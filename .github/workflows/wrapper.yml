@@ -82,6 +82,9 @@ on:
     # travel there. The wrapper is one job in one workflow, so this is the
     # only declaration -- and it is the one a pilot consumer calls.
     outputs:
+      review_result:
+        description: "Versioned aggregate outcome JSON; populated when upstream_ref includes the AT-2520 result contract, missing means unknown"
+        value: ${{ jobs.review.outputs.review_result }}
       reviewer_roster:
         description: "JSON {expected, responded, missing{name: reason}} for this round; see ignite-corp/ai-dev-pr-review README 'Output contract reference' for which missing reasons are benign"
         value: ${{ jobs.review.outputs.reviewer_roster }}
@@ -109,6 +112,7 @@ jobs:
     # steps.size-check.outcome == 'success'` -- which is the same shape a
     # caller sees on base when the aggregate job is skipped.
     outputs:
+      review_result: ${{ steps.aggregate.outputs.review_result }}
       reviewer_roster: ${{ steps.aggregate.outputs.reviewer_roster }}
       reviewers_expected_count: ${{ steps.aggregate.outputs.reviewers_expected_count }}
       reviewers_responded_count: ${{ steps.aggregate.outputs.reviewers_responded_count }}
