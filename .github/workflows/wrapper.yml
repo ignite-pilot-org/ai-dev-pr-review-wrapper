@@ -94,6 +94,9 @@ on:
       reviewers_responded_count:
         description: "How many of them produced a usable verdict. A benign round can report fewer than expected, so a gate must read reviewer_roster.missing rather than compare the counts alone"
         value: ${{ jobs.review.outputs.reviewers_responded_count }}
+      folded_findings_count:
+        description: "Findings folded into comments instead of inline threads; populated when upstream_ref includes AT-2553. Empty means unknown, never zero"
+        value: ${{ jobs.review.outputs.folded_findings_count }}
 
 permissions:
   contents: read
@@ -116,6 +119,7 @@ jobs:
       reviewer_roster: ${{ steps.aggregate.outputs.reviewer_roster }}
       reviewers_expected_count: ${{ steps.aggregate.outputs.reviewers_expected_count }}
       reviewers_responded_count: ${{ steps.aggregate.outputs.reviewers_responded_count }}
+      folded_findings_count: ${{ steps.aggregate.outputs.folded_findings_count }}
 
     # AT-2103: this ceiling is now an outer backstop, not the enforcement
     # mechanism. Before this fix it *was* the mechanism -- the only timeout on
