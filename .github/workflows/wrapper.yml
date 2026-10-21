@@ -597,26 +597,92 @@ jobs:
               exit 1
             fi
           fi
+          # Pull prompts from BASE branch to prevent PRs from modifying
+          # review instructions via context.md injection. On first-time
+          # onboarding the base branch lacks the prompt files; fall back to
+          # the PR head copy and emit a warning so the security caveat is
+          # surfaced. A consumer with the file on neither side gets the
+          # wrapper's canonical default from .wrapper-defaults.
+          #
+          # Only absence falls through: a prompt the consumer does carry but
+          # that is empty, or is not a regular file, fails the step instead,
+          # because swapping a broken prompt for the default would hide the
+          # breakage behind a review that looks normal.
+          #
+          # Every source is read from git objects, never a working tree, and
+          # only as a regular file (mode 100644 / 100755). A symlink is a
+          # blob too (mode 120000, its content the link target), and a `cat`
+          # of a checkout follows a link -- on the path or on any parent
+          # directory -- to any file on the runner, whose contents the
+          # reviewers would then read as their prompt. The head is read at
+          # HEAD_SHA, the commit 'Put the working tree on the PR head'
+          # asserted the checkout is; the default at the commit 'Checkout
+          # wrapper canonical default prompts' checked out. Same rule as
+          # base-ai-review-prepare.yml (ignite-corp/ai-dev-pr-review #210).
           git fetch --depth=1 origin "$BASE_REF"
-          if git show "origin/${BASE_REF}:${SYSTEM_PROMPT_PATH}" > context.md 2>/dev/null; then
-            :
-          elif [ -f "${SYSTEM_PROMPT_PATH}" ]; then
-            echo "::warning title=Onboarding prompt fallback::Base branch '${BASE_REF}' has no ${SYSTEM_PROMPT_PATH}; using PR head. Future PRs will use the base branch version once this PR merges."
-            cat "${SYSTEM_PROMPT_PATH}" > context.md
-          else
-            echo "::warning title=Using wrapper canonical default::Consumer repo has no ${SYSTEM_PROMPT_PATH} on either branch; falling back to wrapper canonical default from .wrapper-defaults/.prompts/code-review-system.md. Consider committing a custom prompt to the consumer for project-specific guidance."
-            cat .wrapper-defaults/.prompts/code-review-system.md > context.md
-          fi
+          : > context.md
+          append_prompt() {
+            local path="$1" name="$2"
+            local rev mode source part default=""
+            part=$(mktemp)
+            rev="origin/${BASE_REF}"
+            source="base branch '${BASE_REF}'"
+            mode=$(git ls-tree --format='%(objectmode)' "$rev" -- "$path")
+            if [ -z "$mode" ]; then
+              rev="$HEAD_SHA"
+              source="PR head"
+              mode=$(git ls-tree --format='%(objectmode)' "$rev" -- "$path")
+              if [ -n "$mode" ]; then
+                echo "::warning title=Onboarding prompt fallback::Base branch '${BASE_REF}' has no ${path}; using PR head. Future PRs will use the base branch version once this PR merges."
+              fi
+            fi
+            if [ -n "$mode" ]; then
+              case "$mode" in
+                100644|100755) git cat-file blob "${rev}:${path}" > "$part" ;;
+                *)
+                  echo "::error title=Unreadable review prompt::${path} on the ${source} is not a regular file (git mode ${mode}; a symlink is 120000, a directory 040000)"
+                  exit 1
+                  ;;
+              esac
+            else
+              default=".prompts/${name}"
+              source="wrapper canonical default .wrapper-defaults/${default}"
+              mode=$(git -C .wrapper-defaults ls-tree --format='%(objectmode)' HEAD -- "$default")
+              case "$mode" in
+                100644|100755) git -C .wrapper-defaults cat-file blob "HEAD:${default}" > "$part" ;;
+                "")
+                  echo "::error title=Missing default review prompt::${path} is on neither the base branch '${BASE_REF}' nor the PR head, and the wrapper checkout has no .wrapper-defaults/${default}"
+                  exit 1
+                  ;;
+                *)
+                  echo "::error title=Unreadable review prompt::${path}: the ${source} is not a regular file (git mode ${mode}; a symlink is 120000, a directory 040000)"
+                  exit 1
+                  ;;
+              esac
+            fi
+            if ! grep -q '[^[:space:]]' "$part"; then
+              local hint
+              if [ -n "$default" ]; then
+                hint="the wrapper default is the last source, so this is a defect in the wrapper release"
+              else
+                hint="fix it, or delete it: a missing prompt falls back to the wrapper canonical default, an empty one does not"
+              fi
+              echo "::error title=Empty review prompt::${path} on the ${source} is empty; ${hint}"
+              exit 1
+            fi
+            # Warning for a default: the weakest source, and where a
+            # misspelled prompt path lands too.
+            if [ -n "$default" ]; then
+              echo "::warning title=Using wrapper canonical default::Consumer repo has no ${path} on either branch; using the ${source}. Consider committing a custom prompt to the consumer for project-specific guidance."
+            else
+              echo "::notice title=Review prompt source::${path}: using the ${source}"
+            fi
+            cat "$part" >> context.md
+            rm -f "$part"
+          }
+          append_prompt "$SYSTEM_PROMPT_PATH" code-review-system.md
           printf '\n\n---\n\n' >> context.md
-          if git show "origin/${BASE_REF}:${CHECKLIST_PATH}" >> context.md 2>/dev/null; then
-            :
-          elif [ -f "${CHECKLIST_PATH}" ]; then
-            echo "::warning title=Onboarding prompt fallback::Base branch '${BASE_REF}' has no ${CHECKLIST_PATH}; using PR head. Future PRs will use the base branch version once this PR merges."
-            cat "${CHECKLIST_PATH}" >> context.md
-          else
-            echo "::warning title=Using wrapper canonical default::Consumer repo has no ${CHECKLIST_PATH} on either branch; falling back to wrapper canonical default from .wrapper-defaults/.prompts/code-review-checklist.md. Consider committing a custom prompt to the consumer for project-specific guidance."
-            cat .wrapper-defaults/.prompts/code-review-checklist.md >> context.md
-          fi
+          append_prompt "$CHECKLIST_PATH" code-review-checklist.md
           # Prepend PR metadata so reviewers can detect dependabot PRs.
           #
           # author, head_ref and base_ref are exactly as attacker-influenceable
