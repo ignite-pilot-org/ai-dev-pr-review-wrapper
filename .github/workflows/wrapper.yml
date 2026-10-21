@@ -1166,6 +1166,7 @@ jobs:
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
+          BOT_LOGIN: github-actions[bot]
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           REVIEWER: claude
@@ -1641,6 +1642,7 @@ jobs:
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
+          BOT_LOGIN: github-actions[bot]
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           REVIEWER: codex
@@ -1790,6 +1792,7 @@ jobs:
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
+          BOT_LOGIN: github-actions[bot]
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           REVIEWER: gemini
@@ -2098,6 +2101,7 @@ jobs:
           EXCLUDED_COUNT: ${{ steps.policy.outputs.excluded_count }}
           EXCLUDED_PATHS: ${{ steps.policy.outputs.excluded_paths }}
           BOT_LOGIN: ${{ vars.BOT_LOGIN || 'github-actions[bot]' }}
+          INLINE_BOT_LOGIN: github-actions[bot]
           CRITICAL_THRESHOLD: ${{ vars.CRITICAL_THRESHOLD || '1' }}
           DEPENDABOT_CRITICAL_THRESHOLD: ${{ vars.DEPENDABOT_CRITICAL_THRESHOLD || '2' }}
           MAJOR_CONSENSUS_OVERLAP: ${{ vars.MAJOR_CONSENSUS_OVERLAP || '0.3' }}
